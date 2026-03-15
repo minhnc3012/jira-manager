@@ -1,0 +1,24 @@
+# Maven
+target/
+
+# H2 database files
+data/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.factorypath
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+
+# Claude Code
+.claude/
