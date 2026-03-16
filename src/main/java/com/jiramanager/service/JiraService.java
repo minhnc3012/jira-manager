@@ -113,7 +113,7 @@ public class JiraService {
                       "jql": "assignee = currentUser() ORDER BY updated DESC",
                       "maxResults": 50,
                       "fields": ["summary","status","priority","project","issuetype",
-                                 "assignee","reporter","created","updated","duedate","customfield_10020"]
+                                 "assignee","reporter","created","updated","duedate","customfield_10020","timetracking"]
                     }
                     """;
 
@@ -272,6 +272,8 @@ public class JiraService {
         JsonNode fields = issue.path("fields");
         String key = text(issue, "key");
 
+        JsonNode tt = fields.path("timetracking");
+
         return JiraTicket.builder()
                 .key(key)
                 .summary(text(fields, "summary"))
@@ -288,6 +290,12 @@ public class JiraService {
                 .dueDate(formatDate(text(fields, "duedate")))
                 .sprint(parseSprint(fields.path("customfield_10020")))
                 .url(baseUrl + "/browse/" + key)
+                .originalEstimate(tt.path("originalEstimate").asText(""))
+                .originalEstimateSeconds(tt.path("originalEstimateSeconds").asLong(0))
+                .timeSpent(tt.path("timeSpent").asText(""))
+                .timeSpentSeconds(tt.path("timeSpentSeconds").asLong(0))
+                .remainingEstimate(tt.path("remainingEstimate").asText(""))
+                .remainingEstimateSeconds(tt.path("remainingEstimateSeconds").asLong(0))
                 .build();
     }
 

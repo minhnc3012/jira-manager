@@ -1,7 +1,7 @@
 # Product Requirements Document — Jira Manager v2
 
 **Stack:** Vaadin Flow 24.6.6 · Spring Boot 3.4.3 · Spring Security · Spring Data JPA · H2 (file-based)
-**Last updated:** 2026-03-15 (overlap detection added)
+**Last updated:** 2026-03-16 (issue-type icons; My Tickets time-tracking + new filters)
 
 ---
 
@@ -113,12 +113,68 @@ Access is role-gated: **ADMIN** users manage the user base; **USER** accounts us
 ## 9. My Tickets (`/tickets` — USER only)
 
 - SplitLayout: 62 % grid / 38 % detail panel.
-- **Filters** (toolbar): Search (key + summary, debounced 300 ms), Status (`MultiSelectComboBox`), Project (`ComboBox`, single-select), Priority (`MultiSelectComboBox`), Sprint (`MultiSelectComboBox`). Refresh button.
-- **Grid columns**: Key, Summary (truncated), Status (badge), Priority, Project, Assignee, Sprint, Due date.
-- **Detail panel**: shown on row select; ticket metadata rows + "Open in Jira" anchor. Placeholder text when nothing is selected.
-- Loading `ProgressBar` while fetching.
-- Ticket count label ("N tickets").
-- Jira API: `POST /rest/api/3/search/jql` with `assignee = currentUser()`.
+
+### 9.1 Filters (toolbar)
+| Filter | Component | Behaviour |
+|--------|-----------|-----------|
+| Search | `TextField` | Matches key or summary, debounced 300 ms |
+| Status | `MultiSelectComboBox` | AND filter across selected values |
+| Project | `ComboBox` (single) | Exact match |
+| Priority | `MultiSelectComboBox` | AND filter |
+| Sprint | `MultiSelectComboBox` | AND filter |
+| Work Type | `MultiSelectComboBox` | Filters by `issueType` (Bug, Story, Task, Epic, …) |
+| Has remaining time | `Checkbox` | When checked, hides tickets where `remainingEstimateSeconds == 0` |
+
+All filter options are populated from the loaded ticket list (distinct, sorted). Ticket count label ("N tickets") updates on every filter change.
+
+### 9.2 Grid columns
+- **Key** — `[issue-type icon] KEY-123` clickable link (opens Jira in new tab). Column 140 px.
+- **Summary** — truncated, tooltip on hover.
+- **Status** — colour-coded badge.
+- **Priority** — colour-coded badge.
+- **Project**, **Updated**, **Due date**.
+
+### 9.3 Issue-type icon
+Jira-style 16 × 16 px coloured rounded square (border-radius 3 px) with a white VaadinIcon inside.
+
+| Issue type | Icon | Background |
+|------------|------|------------|
+| Bug | `BUG` | `#e5493a` red |
+| Epic | `BOLT` | `#904ee2` purple |
+| Story | `BOOKMARK` | `#63ba3c` green |
+| Task | `CHECK` | `#4bade8` blue |
+| Sub-task | `ARROW_RIGHT` | `#4bade8` blue |
+| Improvement | `ARROW_UP` | `#4bade8` blue |
+| New Feature | `STAR` | `#63ba3c` green |
+| Test | `FLASK` | `#f79232` orange |
+| Question / Support | `QUESTION` | `#4bade8` blue |
+| Change / Request | `EXCHANGE` | `#4bade8` blue |
+| Risk | `WARNING` | `#f79232` orange |
+| *(fallback)* | `FILE_O` | `#8993a4` grey |
+
+Icon has a `title` attribute (native browser tooltip) set to the raw issue-type string.
+
+### 9.4 Detail panel
+Shown on row select; placeholder when nothing is selected. Sections:
+
+**Header**: `[issue-type icon 18 px]  KEY-123` link → summary paragraph → status + priority badges.
+
+**Fields**: Project · Type (`[icon 14 px] Bug`) · Assignee · Reporter · Sprint · Created · Updated · Due date (if set).
+
+**Time Tracking section** (new):
+- Rows: Original Estimate · Logged · Remaining.
+- `ProgressBar` (0–100 %) when `originalEstimateSeconds > 0`:
+  - Blue `#0052cc` ≤ 74 %
+  - Orange `#ff8b00` 75–99 %
+  - Red `#de350b` ≥ 100 % (over-estimate)
+- Percentage label "X% logged" below the bar.
+
+**Actions**: "Open in Jira ↗" primary button.
+
+### 9.5 Data loading
+- `JiraService.getMyTickets()` → `POST /rest/api/3/search/jql` with `assignee = currentUser()`, `maxResults: 50`.
+- Fields requested: `summary, status, priority, project, issuetype, assignee, reporter, created, updated, duedate, customfield_10020 (sprint), timetracking`.
+- Loading `ProgressBar` (3 px, indeterminate) shown during fetch.
 
 ---
 
@@ -132,7 +188,8 @@ Access is role-gated: **ADMIN** users manage the user base; **USER** accounts us
 - Date picker (default = today); user can browse any date.
 
 ### 10.2 Ticket column (frozen)
-- Two-line label: key (bold, blue) + summary (truncated, gray).
+- Two-line label: **`[issue-type icon 14 px]  key`** (bold, blue) + summary (truncated, gray).
+- Issue-type icon uses the same colour/icon mapping as My Tickets (§ 9.3).
 - `position: sticky; left: 0` — stays visible on horizontal scroll.
 - Total row: "Total: Xh Ym" label inside the sticky cell.
 
@@ -146,7 +203,10 @@ Access is role-gated: **ADMIN** users manage the user base; **USER** accounts us
 
 ### 10.5 Bar interaction
 - Click bar → highlight (box-shadow + brightness filter) + populate detail panel.
-- Detail panel sections: **Ticket Info** (key, summary, status, priority, sprint, assignee) + **Worklog Entry** (author, start, end, duration) + **Time Tracking** (original estimate, time spent, remaining — with `ProgressBar`).
+- **Detail panel header**: `[issue-type icon 18 px]  KEY-123` link → summary → status + priority badges.
+- **Ticket Info section**: Project · Type (`[icon 13 px] Bug`) · Assignee · Reporter · Sprint.
+- **Worklog Entry section**: Date · Time range · Duration · Logged by.
+- **Time Tracking section**: Original estimate · Time spent (total) · Remaining + `ProgressBar` (over-estimate → `--lumo-primary-color: #de350b`).
 
 ### 10.6 Overlap detection
 - Implemented in `WorklogOverlapDetector` (pure utility, no Spring dependency).
@@ -213,6 +273,20 @@ Access is role-gated: **ADMIN** users manage the user base; **USER** accounts us
 | provider_id | VARCHAR(255) | OAuth2 UID; null for local |
 | provider_email | VARCHAR(255) | |
 
+### `JiraTicket` (in-memory model — not persisted)
+| Field | Type | Notes |
+|-------|------|-------|
+| key, summary, status, statusColor | String | |
+| priority, project, issueType | String | |
+| assignee, reporter, description | String | |
+| created, updated, dueDate, sprint, url | String | |
+| originalEstimate | String | e.g. `"4h"` — from Jira `timetracking` field |
+| originalEstimateSeconds | long | raw seconds |
+| timeSpent | String | e.g. `"2h 30m"` |
+| timeSpentSeconds | long | raw seconds |
+| remainingEstimate | String | e.g. `"1h 30m"` |
+| remainingEstimateSeconds | long | raw seconds; used by "Has remaining time" filter |
+
 ### `jira_configs`
 | Column | Type | Notes |
 |--------|------|-------|
@@ -233,6 +307,7 @@ Access is role-gated: **ADMIN** users manage the user base; **USER** accounts us
 - `isConfigured()` — safe check, never throws; used by nav guards and sidebar.
 - `JiraNotConfiguredException` — thrown when config is missing or incomplete.
 - `formatDuration(int minutes)` — static utility, e.g. "1h 30m", "45m", "2h".
+- `getMyTickets()` requests the `timetracking` field; `parseTicket()` maps `originalEstimate`, `timeSpent`, `remainingEstimate` (string + seconds) onto `JiraTicket`.
 
 ---
 

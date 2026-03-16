@@ -5,11 +5,13 @@ import com.jiramanager.service.JiraService;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
+import com.vaadin.flow.component.checkbox.Checkbox;
 import com.vaadin.flow.component.combobox.ComboBox;
 import com.vaadin.flow.component.combobox.MultiSelectComboBox;
 import com.vaadin.flow.component.grid.Grid;
 import com.vaadin.flow.component.grid.GridVariant;
 import com.vaadin.flow.component.html.*;
+import com.vaadin.flow.component.icon.Icon;
 import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.component.notification.NotificationVariant;
@@ -44,12 +46,14 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
     // Grid
     private final Grid<JiraTicket> grid = new Grid<>(JiraTicket.class, false);
 
-    // Filters — project stays single-select; status/priority/sprint become multi-select
-    private final TextField searchField            = new TextField();
-    private final MultiSelectComboBox<String> statusFilter   = new MultiSelectComboBox<>("Status");
-    private final ComboBox<String>            projectFilter  = new ComboBox<>("Project");
-    private final MultiSelectComboBox<String> priorityFilter = new MultiSelectComboBox<>("Priority");
-    private final MultiSelectComboBox<String> sprintFilter   = new MultiSelectComboBox<>("Sprint");
+    // Filters — project stays single-select; status/priority/sprint/workType become multi-select
+    private final TextField searchField                       = new TextField();
+    private final MultiSelectComboBox<String> statusFilter    = new MultiSelectComboBox<>("Status");
+    private final ComboBox<String>            projectFilter   = new ComboBox<>("Project");
+    private final MultiSelectComboBox<String> priorityFilter  = new MultiSelectComboBox<>("Priority");
+    private final MultiSelectComboBox<String> sprintFilter    = new MultiSelectComboBox<>("Sprint");
+    private final MultiSelectComboBox<String> workTypeFilter  = new MultiSelectComboBox<>("Work Type");
+    private final Checkbox hasRemainingFilter                 = new Checkbox("Has remaining time");
 
     private final Span ticketCount = new Span();
     private final ProgressBar loadingBar = new ProgressBar();
@@ -111,6 +115,19 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
         sprintFilter.setWidth("220px");
         sprintFilter.addValueChangeListener(e -> applyFilters());
 
+        // Multi-select: work type
+        workTypeFilter.setPlaceholder("All types");
+        workTypeFilter.setClearButtonVisible(true);
+        workTypeFilter.setWidth("160px");
+        workTypeFilter.addValueChangeListener(e -> applyFilters());
+
+        // Checkbox: has remaining time
+        hasRemainingFilter.getStyle()
+                .set("align-self", "center")
+                .set("font-size", "13px")
+                .set("white-space", "nowrap");
+        hasRemainingFilter.addValueChangeListener(e -> applyFilters());
+
         Button refreshBtn = new Button("Refresh", VaadinIcon.REFRESH.create());
         refreshBtn.addThemeVariants(ButtonVariant.LUMO_PRIMARY);
         refreshBtn.addClickListener(e -> loadTickets());
@@ -123,6 +140,7 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
 
         HorizontalLayout bar = new HorizontalLayout(
                 searchField, statusFilter, projectFilter, priorityFilter, sprintFilter,
+                workTypeFilter, hasRemainingFilter,
                 refreshBtn, ticketCount);
         bar.setWidthFull();
         bar.setAlignItems(Alignment.END);
@@ -171,14 +189,21 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
         grid.getStyle().set("background", "white");
 
         grid.addComponentColumn(t -> {
+            Span typeIcon = issueTypeIcon(t.getIssueType(), "16px");
+
             Anchor link = new Anchor(t.getUrl(), t.getKey());
             link.setTarget("_blank");
             link.getStyle()
                     .set("font-weight", "600")
                     .set("color", "#0052cc")
                     .set("text-decoration", "none");
-            return link;
-        }).setHeader("Key").setWidth("110px").setFlexGrow(0);
+
+            HorizontalLayout cell = new HorizontalLayout(typeIcon, link);
+            cell.setAlignItems(Alignment.CENTER);
+            cell.setSpacing(false);
+            cell.getStyle().set("gap", "6px");
+            return cell;
+        }).setHeader("Key").setWidth("140px").setFlexGrow(0);
 
         grid.addColumn(JiraTicket::getSummary)
                 .setHeader("Summary").setFlexGrow(3).setTooltipGenerator(JiraTicket::getSummary);
@@ -242,6 +267,8 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
         detailPanel.setJustifyContentMode(FlexComponent.JustifyContentMode.START);
 
         // ── Header ────────────────────────────────────────────────────
+        Span typeIcon = issueTypeIcon(t.getIssueType(), "18px");
+
         Anchor keyLink = new Anchor(t.getUrl(), t.getKey());
         keyLink.setTarget("_blank");
         keyLink.getStyle()
@@ -250,6 +277,11 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
                 .set("color", "#0052cc")
                 .set("text-decoration", "none")
                 .set("letter-spacing", "0.5px");
+
+        HorizontalLayout keyRow = new HorizontalLayout(typeIcon, keyLink);
+        keyRow.setAlignItems(Alignment.CENTER);
+        keyRow.setSpacing(false);
+        keyRow.getStyle().set("gap", "6px");
 
         Paragraph summary = new Paragraph(t.getSummary());
         summary.getStyle()
@@ -274,7 +306,7 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
 
         fields.add(
                 detailRow("Project",  t.getProject()),
-                detailRow("Type",     t.getIssueType()),
+                detailRowWithIcon("Type", issueTypeIcon(t.getIssueType(), "14px"), t.getIssueType()),
                 detailRow("Assignee", t.getAssignee()),
                 detailRow("Reporter", t.getReporter()),
                 detailRow("Sprint",   t.getSprint()),
@@ -285,13 +317,67 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
             fields.add(detailRow("Due date", t.getDueDate()));
         }
 
+        // ── Time Tracking ─────────────────────────────────────────────
+        Hr ttDivider = new Hr();
+        ttDivider.getStyle().set("margin", "16px 0 12px 0").set("border-color", "#dfe1e6");
+
+        Span ttTitle = new Span("Time Tracking");
+        ttTitle.getStyle()
+                .set("font-size", "11px")
+                .set("font-weight", "700")
+                .set("color", "#6b778c")
+                .set("text-transform", "uppercase")
+                .set("letter-spacing", "0.5px")
+                .set("margin-bottom", "8px")
+                .set("display", "block");
+
+        VerticalLayout ttSection = new VerticalLayout();
+        ttSection.setPadding(false);
+        ttSection.setSpacing(false);
+        ttSection.getStyle().set("gap", "4px");
+
+        String origEst = t.getOriginalEstimate();
+        String timeSpent = t.getTimeSpent();
+        String remaining = t.getRemainingEstimate();
+        long origSec  = t.getOriginalEstimateSeconds();
+        long spentSec = t.getTimeSpentSeconds();
+
+        ttSection.add(detailRow("Original", origEst != null && !origEst.isBlank() ? origEst : "—"));
+        ttSection.add(detailRow("Logged",   timeSpent != null && !timeSpent.isBlank() ? timeSpent : "—"));
+        ttSection.add(detailRow("Remaining", remaining != null && !remaining.isBlank() ? remaining : "—"));
+
+        // Progress bar: logged / original estimate
+        if (origSec > 0) {
+            double ratio = Math.min((double) spentSec / origSec, 1.0);
+            ProgressBar ttBar = new ProgressBar(0, 1, ratio);
+            ttBar.setWidthFull();
+            ttBar.getStyle()
+                    .set("height", "6px")
+                    .set("border-radius", "3px")
+                    .set("margin-top", "8px");
+            if (ratio >= 1.0)
+                ttBar.getStyle().set("--vaadin-progress-value-background", "#de350b");
+            else if (ratio >= 0.75)
+                ttBar.getStyle().set("--vaadin-progress-value-background", "#ff8b00");
+            else
+                ttBar.getStyle().set("--vaadin-progress-value-background", "#0052cc");
+
+            Span barLabel = new Span(Math.round(ratio * 100) + "% logged");
+            barLabel.getStyle()
+                    .set("font-size", "11px")
+                    .set("color", "#6b778c")
+                    .set("margin-top", "2px");
+            ttSection.add(ttBar, barLabel);
+        }
+
         // ── Actions ───────────────────────────────────────────────────
         Button openInJira = new Button("Open in Jira ↗",
                 e -> UI.getCurrent().getPage().open(t.getUrl(), "_blank"));
         openInJira.addThemeVariants(ButtonVariant.LUMO_PRIMARY, ButtonVariant.LUMO_SMALL);
         openInJira.getStyle().set("margin-top", "24px");
 
-        detailPanel.add(keyLink, summary, badges, divider, fields, openInJira);
+        detailPanel.add(keyRow, summary, badges, divider, fields,
+                ttDivider, ttTitle, ttSection, openInJira);
     }
 
     // ── Data loading ──────────────────────────────────────────────────
@@ -327,15 +413,19 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
                 .filter(p -> p != null && !p.isBlank()).distinct().toList());
         sprintFilter.setItems(allTickets.stream().map(JiraTicket::getSprint)
                 .filter(s -> s != null && !s.isBlank()).distinct().sorted().toList());
+        workTypeFilter.setItems(allTickets.stream().map(JiraTicket::getIssueType)
+                .filter(t -> t != null && !t.isBlank()).distinct().sorted().toList());
     }
 
     private void applyFilters() {
         if (dataProvider == null) return;
-        String search      = searchField.getValue().toLowerCase();
-        Set<String> statuses   = statusFilter.getValue();
-        String project     = projectFilter.getValue();
-        Set<String> priorities = priorityFilter.getValue();
-        Set<String> sprints    = sprintFilter.getValue();
+        String search           = searchField.getValue().toLowerCase();
+        Set<String> statuses    = statusFilter.getValue();
+        String project          = projectFilter.getValue();
+        Set<String> priorities  = priorityFilter.getValue();
+        Set<String> sprints     = sprintFilter.getValue();
+        Set<String> workTypes   = workTypeFilter.getValue();
+        boolean onlyRemaining   = hasRemainingFilter.getValue();
 
         dataProvider.setFilter(t ->
                 (search.isBlank()
@@ -345,6 +435,8 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
                 && (project == null      || t.getProject().equals(project))
                 && (priorities.isEmpty() || priorities.contains(t.getPriority()))
                 && (sprints.isEmpty()    || sprints.contains(t.getSprint()))
+                && (workTypes.isEmpty()  || workTypes.contains(t.getIssueType()))
+                && (!onlyRemaining       || t.getRemainingEstimateSeconds() > 0)
         );
         ticketCount.setText(
                 dataProvider.size(new com.vaadin.flow.data.provider.Query<>()) + " tickets");
@@ -392,6 +484,101 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
         else
             b.getStyle().set("background", "#f4f5f7").set("color", "#6b778c");
         return b;
+    }
+
+    // ── Issue type icon (Jira-style colored badge) ─────────────────────
+
+    /**
+     * Returns a coloured square icon that matches Jira's per-issue-type icon style.
+     * The icon is sized to {@code size} (e.g. "16px", "18px").
+     */
+    private Span issueTypeIcon(String issueType, String size) {
+        String t = issueType != null ? issueType.toLowerCase() : "";
+
+        VaadinIcon vIcon;
+        String bgColor;
+
+        if (t.contains("bug")) {
+            vIcon    = VaadinIcon.BUG;
+            bgColor  = "#e5493a";           // Jira red
+        } else if (t.contains("epic")) {
+            vIcon    = VaadinIcon.BOLT;
+            bgColor  = "#904ee2";           // Jira purple
+        } else if (t.contains("story")) {
+            vIcon    = VaadinIcon.BOOKMARK;
+            bgColor  = "#63ba3c";           // Jira green
+        } else if (t.contains("sub")) {
+            vIcon    = VaadinIcon.ARROW_RIGHT;
+            bgColor  = "#4bade8";           // Jira light-blue (sub-task)
+        } else if (t.contains("improvement")) {
+            vIcon    = VaadinIcon.ARROW_UP;
+            bgColor  = "#4bade8";
+        } else if (t.contains("feature") || t.contains("new feature")) {
+            vIcon    = VaadinIcon.STAR;
+            bgColor  = "#63ba3c";
+        } else if (t.contains("question") || t.contains("support")) {
+            vIcon    = VaadinIcon.QUESTION;
+            bgColor  = "#4bade8";
+        } else if (t.contains("task")) {
+            vIcon    = VaadinIcon.CHECK;
+            bgColor  = "#4bade8";           // Jira blue (task)
+        } else if (t.contains("test")) {
+            vIcon    = VaadinIcon.FLASK;
+            bgColor  = "#f79232";           // Jira orange
+        } else if (t.contains("change") || t.contains("request")) {
+            vIcon    = VaadinIcon.EXCHANGE;
+            bgColor  = "#4bade8";
+        } else if (t.contains("risk")) {
+            vIcon    = VaadinIcon.WARNING;
+            bgColor  = "#f79232";
+        } else {
+            vIcon    = VaadinIcon.FILE_O;
+            bgColor  = "#8993a4";           // grey fallback
+        }
+
+        // Parse the numeric part of size so we can shrink the inner icon
+        int px = 16;
+        try { px = Integer.parseInt(size.replace("px", "")); } catch (NumberFormatException ignored) {}
+
+        Icon icon = vIcon.create();
+        icon.setSize((px - 4) + "px");
+        icon.setColor("white");
+
+        Span badge = new Span(icon);
+        badge.getStyle()
+                .set("display", "inline-flex")
+                .set("align-items", "center")
+                .set("justify-content", "center")
+                .set("width", size)
+                .set("height", size)
+                .set("min-width", size)
+                .set("border-radius", "3px")
+                .set("background", bgColor)
+                .set("flex-shrink", "0");
+        badge.getElement().setAttribute("title", issueType != null ? issueType : "");
+        return badge;
+    }
+
+    private HorizontalLayout detailRowWithIcon(String label, Span icon, String value) {
+        Span l = new Span(label);
+        l.getStyle()
+                .set("color", "#6b778c")
+                .set("font-size", "12px")
+                .set("min-width", "80px")
+                .set("font-weight", "500")
+                .set("text-transform", "uppercase")
+                .set("letter-spacing", "0.5px");
+        Span v = new Span(value != null && !value.isBlank() ? value : "—");
+        v.getStyle().set("color", "#172b4d").set("font-size", "13px");
+
+        HorizontalLayout valueRow = new HorizontalLayout(icon, v);
+        valueRow.setAlignItems(Alignment.CENTER);
+        valueRow.setSpacing(false);
+        valueRow.getStyle().set("gap", "6px");
+
+        HorizontalLayout row = new HorizontalLayout(l, valueRow);
+        row.getStyle().set("padding", "5px 0").set("gap", "12px").set("align-items", "center");
+        return row;
     }
 
     private HorizontalLayout detailRow(String label, String value) {

@@ -7,6 +7,7 @@ import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
 import com.vaadin.flow.component.datepicker.DatePicker;
 import com.vaadin.flow.component.html.*;
+import com.vaadin.flow.component.icon.Icon;
 import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.component.notification.NotificationVariant;
@@ -286,11 +287,17 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
 
         WorklogEntry first = entries.get(0);
 
-        // ── Label cell: two lines (key + summary) ─────────────────────
+        // ── Label cell: [type icon + key] / summary ────────────────────
+        Span typeIcon = issueTypeIcon(first.getIssueType(), "14px");
+
         Span keySpan = new Span(key);
         keySpan.getStyle()
                 .set("font-size", "12px").set("font-weight", "700")
                 .set("color", "#0052cc").set("white-space", "nowrap");
+
+        Div keyRow = new Div(typeIcon, keySpan);
+        keyRow.getStyle()
+                .set("display", "flex").set("align-items", "center").set("gap", "5px");
 
         Span sumSpan = new Span(first.getSummary());
         sumSpan.getStyle()
@@ -299,7 +306,7 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
                 .set("text-overflow", "ellipsis").set("display", "block")
                 .set("max-width", (LABEL_PX - 24) + "px");
 
-        Div labelContent = new Div(keySpan, sumSpan);
+        Div labelContent = new Div(keyRow, sumSpan);
         labelContent.getStyle()
                 .set("display", "flex").set("flex-direction", "column")
                 .set("justify-content", "center").set("gap", "2px")
@@ -502,11 +509,18 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         }
 
         // ── Header ────────────────────────────────────────────────────
+        Span detailTypeIcon = issueTypeIcon(e.getIssueType(), "18px");
+
         Anchor keyLink = new Anchor(e.getTicketUrl(), e.getTicketKey());
         keyLink.setTarget("_blank");
         keyLink.getStyle()
                 .set("font-weight", "700").set("font-size", "13px")
                 .set("color", "#0052cc").set("text-decoration", "none");
+
+        HorizontalLayout keyRow = new HorizontalLayout(detailTypeIcon, keyLink);
+        keyRow.setAlignItems(Alignment.CENTER);
+        keyRow.setSpacing(false);
+        keyRow.getStyle().set("gap", "6px");
 
         Paragraph summary = new Paragraph(e.getSummary());
         summary.getStyle()
@@ -522,7 +536,7 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         H5 ticketSection = sectionTitle("Ticket Info");
         VerticalLayout ticketFields = fieldGroup(
                 detailRow("Project",  e.getProject()),
-                detailRow("Type",     e.getIssueType()),
+                detailRowWithIcon("Type", issueTypeIcon(e.getIssueType(), "13px"), e.getIssueType()),
                 detailRow("Assignee", e.getAssignee()),
                 detailRow("Reporter", e.getReporter()),
                 detailRow("Sprint",   e.getSprint())
@@ -551,7 +565,7 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         openInJira.getStyle().set("margin-top", "20px");
 
         detailPanel.add(
-                keyLink, summary, badges,
+                keyRow, summary, badges,
                 div1, ticketSection, ticketFields,
                 div2, logSection, logFields,
                 div3, ttSection, ttFields,
@@ -734,6 +748,78 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
             b.getStyle().set("background", "#e3fcef").set("color", "#006644");
         else b.getStyle().set("background", "#f4f5f7").set("color", "#6b778c");
         return b;
+    }
+
+    // ── Issue type icon (Jira-style colored badge) ─────────────────────
+
+    private Span issueTypeIcon(String issueType, String size) {
+        String t = issueType != null ? issueType.toLowerCase() : "";
+
+        VaadinIcon vIcon;
+        String bgColor;
+
+        if (t.contains("bug")) {
+            vIcon   = VaadinIcon.BUG;       bgColor = "#e5493a";
+        } else if (t.contains("epic")) {
+            vIcon   = VaadinIcon.BOLT;      bgColor = "#904ee2";
+        } else if (t.contains("story")) {
+            vIcon   = VaadinIcon.BOOKMARK;  bgColor = "#63ba3c";
+        } else if (t.contains("sub")) {
+            vIcon   = VaadinIcon.ARROW_RIGHT; bgColor = "#4bade8";
+        } else if (t.contains("improvement")) {
+            vIcon   = VaadinIcon.ARROW_UP;  bgColor = "#4bade8";
+        } else if (t.contains("feature") || t.contains("new feature")) {
+            vIcon   = VaadinIcon.STAR;      bgColor = "#63ba3c";
+        } else if (t.contains("question") || t.contains("support")) {
+            vIcon   = VaadinIcon.QUESTION;  bgColor = "#4bade8";
+        } else if (t.contains("task")) {
+            vIcon   = VaadinIcon.CHECK;     bgColor = "#4bade8";
+        } else if (t.contains("test")) {
+            vIcon   = VaadinIcon.FLASK;     bgColor = "#f79232";
+        } else if (t.contains("change") || t.contains("request")) {
+            vIcon   = VaadinIcon.EXCHANGE;  bgColor = "#4bade8";
+        } else if (t.contains("risk")) {
+            vIcon   = VaadinIcon.WARNING;   bgColor = "#f79232";
+        } else {
+            vIcon   = VaadinIcon.FILE_O;    bgColor = "#8993a4";
+        }
+
+        int px = 16;
+        try { px = Integer.parseInt(size.replace("px", "")); } catch (NumberFormatException ignored) {}
+
+        Icon icon = vIcon.create();
+        icon.setSize((px - 4) + "px");
+        icon.setColor("white");
+
+        Span badge = new Span(icon);
+        badge.getStyle()
+                .set("display", "inline-flex")
+                .set("align-items", "center")
+                .set("justify-content", "center")
+                .set("width", size).set("height", size).set("min-width", size)
+                .set("border-radius", "3px")
+                .set("background", bgColor)
+                .set("flex-shrink", "0");
+        badge.getElement().setAttribute("title", issueType != null ? issueType : "");
+        return badge;
+    }
+
+    private HorizontalLayout detailRowWithIcon(String label, Span icon, String value) {
+        Span l = new Span(label);
+        l.getStyle().set("color", "#6b778c").set("font-size", "11px").set("min-width", "130px")
+                .set("font-weight", "600").set("text-transform", "uppercase")
+                .set("letter-spacing", "0.4px");
+        Span v = new Span(value != null && !value.isBlank() ? value : "—");
+        v.getStyle().set("color", "#172b4d").set("font-size", "13px");
+
+        HorizontalLayout valueRow = new HorizontalLayout(icon, v);
+        valueRow.setAlignItems(Alignment.CENTER);
+        valueRow.setSpacing(false);
+        valueRow.getStyle().set("gap", "5px");
+
+        HorizontalLayout row = new HorizontalLayout(l, valueRow);
+        row.getStyle().set("padding", "4px 0").set("gap", "8px").set("align-items", "center");
+        return row;
     }
 
     // ── Layout helpers ────────────────────────────────────────────────

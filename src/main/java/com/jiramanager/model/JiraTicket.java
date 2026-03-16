@@ -21,4 +21,12 @@ public class JiraTicket {
     private String dueDate;
     private String sprint;
     private String url;
+
+    // Time tracking
+    private String originalEstimate;
+    private long   originalEstimateSeconds;
+    private String timeSpent;
+    private long   timeSpentSeconds;
+    private String remainingEstimate;
+    private long   remainingEstimateSeconds;
 }
