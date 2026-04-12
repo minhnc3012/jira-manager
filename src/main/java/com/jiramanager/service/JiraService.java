@@ -14,11 +14,15 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import com.jiramanager.model.ConfluencePage;
+
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
@@ -42,6 +46,10 @@ public class JiraService {
         this.sessionUserService = null;
         this.testContext        = new ConfigContext(webClient, baseUrl);
     }
+
+    /** Matches Confluence page URLs: extracts the numeric page ID. */
+    private static final Pattern CONFLUENCE_PAGE_ID =
+            Pattern.compile("/wiki/(?:spaces/[^/]+/pages|pages)/([0-9]+)");
 
     // Formatter that handles Jira's "+0700" timezone offset (no colon)
     private static final DateTimeFormatter JIRA_TS_FMT = new DateTimeFormatterBuilder()
@@ -98,6 +106,9 @@ public class JiraService {
                 .baseUrl(cfg.getBaseUrl())
                 .defaultHeader(HttpHeaders.AUTHORIZATION, "Basic " + credentials)
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                .exchangeStrategies(org.springframework.web.reactive.function.client.ExchangeStrategies.builder()
+                        .codecs(cfg2 -> cfg2.defaultCodecs().maxInMemorySize(10 * 1024 * 1024)) // 10 MB
+                        .build())
                 .build();
 
         return new ConfigContext(client, cfg.getBaseUrl());
@@ -113,7 +124,7 @@ public class JiraService {
                       "jql": "assignee = currentUser() ORDER BY updated DESC",
                       "maxResults": 50,
                       "fields": ["summary","status","priority","project","issuetype",
-                                 "assignee","reporter","created","updated","duedate","customfield_10020","timetracking"]
+                                 "assignee","reporter","created","updated","duedate","customfield_10020","timetracking","description"]
                     }
                     """;
 
@@ -290,6 +301,7 @@ public class JiraService {
                 .dueDate(formatDate(text(fields, "duedate")))
                 .sprint(parseSprint(fields.path("customfield_10020")))
                 .url(baseUrl + "/browse/" + key)
+                .confluencePageIds(extractConfluencePageIds(fields.path("description"), baseUrl))
                 .originalEstimate(tt.path("originalEstimate").asText(""))
                 .originalEstimateSeconds(tt.path("originalEstimateSeconds").asLong(0))
                 .timeSpent(tt.path("timeSpent").asText(""))
@@ -341,6 +353,188 @@ public class JiraService {
     private String formatDate(String iso) {
         if (iso == null || iso.isBlank()) return "";
         return iso.length() >= 10 ? iso.substring(0, 10) : iso;
+    }
+
+    // ── Confluence ────────────────────────────────────────────────────
+
+    /**
+     * Returns Confluence page IDs linked to a Jira issue via Jira's Remote Links feature
+     * (the "Confluence Pages" section visible in the Jira issue sidebar).
+     * This is the primary way Confluence pages are associated with Jira tickets — they are
+     * NOT stored in the description ADF but as separate remote link objects.
+     */
+    /** Pattern to extract Confluence page ID from globalId: "appId=xxx&pageId=187203592" */
+    private static final Pattern GLOBAL_ID_PAGE = Pattern.compile("pageId=([0-9]+)");
+
+    public List<String> getConfluenceRemoteLinks(String issueKey) {
+        ConfigContext ctx = resolveContext();
+        try {
+            JsonNode resp = ctx.webClient().get()
+                    .uri("/rest/api/3/issue/" + issueKey + "/remotelink")
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, cr ->
+                            cr.bodyToMono(String.class).map(body ->
+                                    new RuntimeException("Remote links error for " + issueKey + ": " + body)))
+                    .bodyToMono(JsonNode.class)
+                    .block();
+
+            if (resp == null || !resp.isArray()) {
+                log.debug("No remote links found for {}", issueKey);
+                return List.of();
+            }
+
+            log.debug("Remote links for {}: {} entries", issueKey, resp.size());
+            List<String> ids = new ArrayList<>();
+
+            for (JsonNode link : resp) {
+                String url      = link.path("object").path("url").asText("");
+                String globalId = link.path("globalId").asText("");
+                String appType  = link.path("application").path("type").asText("");
+
+                // Log every entry so we can see exactly what Jira returns
+                log.debug("  remotelink app={} globalId={} url={}", appType, globalId, url);
+
+                // Source 1: URL in object
+                addIfConfluencePage(url, ids);
+
+                // Source 2: globalId like "appId=xxx&pageId=187203592"
+                // This is how Confluence-linked pages appear when linked from Confluence side
+                Matcher gm = GLOBAL_ID_PAGE.matcher(globalId);
+                if (gm.find()) {
+                    String id = gm.group(1);
+                    if (!ids.contains(id)) {
+                        log.debug("  -> Confluence page found via globalId: {}", id);
+                        ids.add(id);
+                    }
+                }
+            }
+            return ids.isEmpty() ? List.of() : List.copyOf(ids);
+        } catch (Exception e) {
+            log.warn("Could not fetch remote links for {}: {}", issueKey, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Fetches a Confluence page by ID using the same credentials as Jira.
+     * Returns null if the page cannot be retrieved.
+     */
+    public ConfluencePage getConfluencePage(String pageId) {
+        ConfigContext ctx = resolveContext();
+        try {
+            // body.view = Confluence-rendered HTML (much cleaner than body.storage)
+            JsonNode resp = ctx.webClient().get()
+                    .uri("/wiki/rest/api/content/" + pageId + "?expand=body.view,space")
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, cr ->
+                            cr.bodyToMono(String.class).map(body ->
+                                    new RuntimeException("Confluence " + cr.statusCode() + ": " + body)))
+                    .bodyToMono(JsonNode.class)
+                    .block();
+
+            if (resp == null) return null;
+
+            String title    = resp.path("title").asText("Untitled");
+            String spaceKey = resp.path("space").path("key").asText("");
+            String url      = ctx.baseUrl() + "/wiki/spaces/" + spaceKey + "/pages/" + pageId;
+            String viewHtml = resp.path("body").path("view").path("value").asText("");
+            String content  = sanitizeViewHtml(viewHtml);
+
+            return new ConfluencePage(pageId, title, url, content);
+        } catch (Exception e) {
+            log.warn("Could not fetch Confluence page {}: {}", pageId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Extracts Confluence page IDs from an ADF description node.
+     * Handles both inlineCard nodes and link marks on text nodes.
+     */
+    private List<String> extractConfluencePageIds(JsonNode descNode, String baseUrl) {
+        if (descNode == null || descNode.isNull() || descNode.isMissingNode()) return List.of();
+        List<String> ids = new ArrayList<>();
+        collectConfluenceLinks(descNode, ids);
+        return ids.isEmpty() ? List.of() : List.copyOf(ids);
+    }
+
+    private void collectConfluenceLinks(JsonNode node, List<String> ids) {
+        String type = node.path("type").asText("");
+
+        // Smart link cards: inlineCard, blockCard, embedCard
+        // {"type":"blockCard","attrs":{"url":"https://.../wiki/.../pages/123456/..."}}
+        if ("inlineCard".equals(type) || "blockCard".equals(type) || "embedCard".equals(type)) {
+            String url = node.path("attrs").path("url").asText("");
+            log.debug("ADF card node type={} url={}", type, url);
+            addIfConfluencePage(url, ids);
+        }
+
+        // link mark on text: {"marks":[{"type":"link","attrs":{"href":"..."}}]}
+        if (node.has("marks")) {
+            for (JsonNode mark : node.get("marks")) {
+                if ("link".equals(mark.path("type").asText())) {
+                    String href = mark.path("attrs").path("href").asText("");
+                    log.debug("ADF link mark href={}", href);
+                    addIfConfluencePage(href, ids);
+                }
+            }
+        }
+
+        if (node.has("content")) {
+            for (JsonNode child : node.get("content")) collectConfluenceLinks(child, ids);
+        }
+    }
+
+    private void addIfConfluencePage(String url, List<String> ids) {
+        if (url == null || url.isBlank()) return;
+        Matcher m = CONFLUENCE_PAGE_ID.matcher(url);
+        if (m.find()) {
+            String id = m.group(1);
+            if (!ids.contains(id)) ids.add(id);
+        }
+    }
+
+    /**
+     * Sanitizes Confluence body.view HTML for safe embedding in the UI.
+     * Removes dangerous tags/attributes while keeping headings, lists, paragraphs,
+     * tables, emphasis, code blocks, and links.
+     */
+    private String sanitizeViewHtml(String html) {
+        if (html == null || html.isBlank()) return "";
+        String clean = html
+                // Remove dangerous tags entirely (with content)
+                .replaceAll("(?is)<script[^>]*>.*?</script>", "")
+                .replaceAll("(?is)<style[^>]*>.*?</style>",   "")
+                .replaceAll("(?is)<iframe[^>]*>.*?</iframe>", "")
+                // Strip event handlers and javascript: hrefs
+                .replaceAll("(?i)\\s+on[a-zA-Z]+\\s*=\\s*\"[^\"]*\"", "")
+                .replaceAll("(?i)\\s+on[a-zA-Z]+\\s*=\\s*'[^']*'",   "")
+                .replaceAll("(?i)(href|src)\\s*=\\s*\"javascript:[^\"]*\"", "href=\"#\"")
+                // Remove Confluence-specific wrapper divs/spans but keep their content
+                .replaceAll("(?i)</?div[^>]*>",  "")
+                .replaceAll("(?i)</?span[^>]*>", "")
+                .replaceAll("(?i)</?section[^>]*>", "")
+                // Clean up attributes from allowed tags (keep them simple)
+                .replaceAll("(<(?:h[1-6]|p|ul|ol|li|table|thead|tbody|tr|td|th|blockquote|pre|code))[^>]*>", "$1>")
+                // Trim excessive whitespace
+                .replaceAll("(\\s*\\n\\s*){3,}", "\n\n")
+                .trim();
+        return clean.length() > 20000 ? clean.substring(0, 20000) + "…" : clean;
+    }
+
+    /** Strips Confluence storage-format XML/HTML to readable plain text. */
+    private String stripStorageFormat(String html) {
+        if (html == null || html.isBlank()) return "";
+        String text = html
+                .replaceAll("(?i)<br\\s*/?>", "\n")
+                .replaceAll("(?i)</(p|h[1-6]|li|tr|div)>", "\n")
+                .replaceAll("<[^>]+>", "")
+                .replaceAll("&amp;",  "&").replaceAll("&lt;",   "<")
+                .replaceAll("&gt;",   ">").replaceAll("&nbsp;", " ")
+                .replaceAll("&quot;", "\"").replaceAll("&#[0-9]+;", "")
+                .replaceAll("\n{3,}", "\n\n")
+                .trim();
+        return text.length() > 15000 ? text.substring(0, 15000) + "…" : text;
     }
 
     private String extractDescription(JsonNode node) {

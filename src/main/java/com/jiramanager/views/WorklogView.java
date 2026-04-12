@@ -1,8 +1,12 @@
 package com.jiramanager.views;
 
+import com.jiramanager.model.ConfluencePage;
+import com.jiramanager.model.JiraTicket;
 import com.jiramanager.model.WorklogEntry;
 import com.jiramanager.service.JiraService;
 import com.vaadin.flow.component.UI;
+import org.springframework.security.concurrent.DelegatingSecurityContextRunnable;
+import org.springframework.security.core.context.SecurityContextHolder;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
 import com.vaadin.flow.component.datepicker.DatePicker;
@@ -27,6 +31,7 @@ import com.jiramanager.service.WorklogOverlapDetector;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Route(value = "worklog", layout = MainLayout.class)
 @PageTitle("Worklog – Jira Manager")
@@ -36,11 +41,16 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
     // ── Chart layout constants ─────────────────────────────────────────
     // Adjust HOUR_PX to scale the whole timeline proportionally.
     // At 90 px/h → 5 min = 7.5 px  |  full day = 24 × 90 = 2 160 px
-    private static final int    HOUR_PX  = 90;
-    private static final int    LABEL_PX = 220;   // label column width
-    private static final int    ROW_H    = 52;    // px – tall enough for 2-line labels
-    private static final int    BAR_H    = 26;    // worklog bar height
-    private static final double MIN_PX   = HOUR_PX / 60.0; // 1.5 px per minute
+    private static final int    HOUR_PX        = 90;
+    private static final int    LABEL_PX       = 220;   // label column width
+    private static final int    ROW_H          = 52;    // px – tall enough for 2-line labels
+    private static final int    BAR_H          = 26;    // worklog bar height
+    private static final double MIN_PX         = HOUR_PX / 60.0; // 1.5 px per minute
+    // Auto-resize: chartPanel height = FILTER_BAR_H + CHART_OVERHEAD + clamp(rows,2,10) * ROW_H
+    private static final int    FILTER_BAR_H   = 60;   // filter bar approx height px
+    private static final int    CHART_OVERHEAD = 75;   // header(36) + dividers(3) + totalRow(36)
+    private static final int    MIN_ROWS       = 2;
+    private static final int    MAX_ROWS       = 10;
 
     // CSS repeating-gradient: strong line every 1 h + faint line every 5 min
     private static final String GRID_BG =
@@ -57,13 +67,19 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
     private Div              selectedBar    = null;
     private List<WorklogEntry> currentEntries = List.of();
     private Set<String>      overlappingIds = Set.of();
+    private List<JiraTicket> myTickets      = List.of();
 
     // ── Persistent UI components ───────────────────────────────────────
-    private final DatePicker     datePicker  = new DatePicker("Date");
-    private final ProgressBar    loadingBar  = new ProgressBar();
-    private final Span           totalLabel  = new Span();
-    private final VerticalLayout chartArea   = new VerticalLayout();
-    private final VerticalLayout detailPanel = new VerticalLayout();
+    private final DatePicker     datePicker        = new DatePicker("Date");
+    private final ProgressBar    loadingBar        = new ProgressBar();
+    private final Span           totalLabel        = new Span();
+    private final VerticalLayout chartPanel        = new VerticalLayout();
+    private final VerticalLayout chartArea         = new VerticalLayout();
+    private final VerticalLayout detailPanel       = new VerticalLayout();
+    private final ProgressBar    loadingBarTickets = new ProgressBar();
+    private final VerticalLayout ticketsToLogPanel = new VerticalLayout();
+    private final VerticalLayout ticketsListArea   = new VerticalLayout();
+    private final Span           ticketsToLogCount = new Span();
 
     public WorklogView(JiraService jiraService) {
         this.jiraService = jiraService;
@@ -73,19 +89,34 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         setSpacing(false);
         getStyle().set("background", "#f4f5f7");
 
-        VerticalLayout leftPanel = new VerticalLayout(
-                buildFilterBar(), buildLoadingBar(), buildChartArea());
-        leftPanel.setSizeFull();
-        leftPanel.setPadding(false);
-        leftPanel.setSpacing(false);
+        chartPanel.add(buildFilterBar(), buildLoadingBar(), buildChartArea());
+        chartPanel.setSizeFull();
+        chartPanel.setPadding(false);
+        chartPanel.setSpacing(false);
 
+        // Left side: vertical SplitLayout — gantt chart (top) | tickets to log (bottom)
+        SplitLayout leftSplit = new SplitLayout(chartPanel, buildTicketsToLogPanel());
+        leftSplit.setOrientation(SplitLayout.Orientation.VERTICAL);
+        leftSplit.setSizeFull();
+        // Default top height ≈ 5 rows; set via JS because setSplitterPosition uses % of unknown viewport
+        int defaultTopPx = FILTER_BAR_H + CHART_OVERHEAD + 4 * ROW_H;
+        leftSplit.getElement().executeJs(
+            "setTimeout(function(){" +
+            "  var h=$0.offsetHeight;" +
+            "  if(h>0){" +
+            "    var pct=Math.min(85,Math.max(15,($1/h)*100));" +
+            "    $0.style.setProperty('--vaadin-split-layout-splitter-position',pct+'%');" +
+            "  }" +
+            "},100);",
+            leftSplit.getElement(), defaultTopPx);
+
+        // Outer horizontal split: left content | shared detail panel (right)
         initDetailPanel();
-
-        SplitLayout split = new SplitLayout(leftPanel, detailPanel);
-        split.setSizeFull();
-        split.setSplitterPosition(65);
-        split.getStyle().set("flex", "1");
-        add(split);
+        SplitLayout outerSplit = new SplitLayout(leftSplit, detailPanel);
+        outerSplit.setSizeFull();
+        outerSplit.setSplitterPosition(65);
+        outerSplit.getStyle().set("flex", "1");
+        add(outerSplit);
 
         datePicker.setValue(LocalDate.now());
         // loadWorklogs() is called in beforeEnter() after Jira config check
@@ -97,6 +128,7 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
             event.forwardTo("settings?jira_required=true");
             return;
         }
+        loadMyTickets();
         loadWorklogs(LocalDate.now());
     }
 
@@ -491,9 +523,146 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         detailPanel.setJustifyContentMode(FlexComponent.JustifyContentMode.CENTER);
         Span icon = new Span("⏱");
         icon.getStyle().set("font-size", "40px").set("margin-bottom", "12px");
-        Span msg = new Span("Click a worklog bar to view details");
+        Span msg = new Span("Click a worklog bar or ticket to view details");
         msg.getStyle().set("color", "#6b778c").set("font-size", "14px").set("font-style", "italic");
         detailPanel.add(icon, msg);
+    }
+
+    private void showTicketDetail(JiraTicket t) {
+        detailPanel.removeAll();
+        detailPanel.setSizeFull();
+        detailPanel.setPadding(false);
+        detailPanel.setSpacing(false);
+
+        // ── Top panel: ticket info (scrollable) ───────────────────────
+        VerticalLayout ticketInfoPanel = new VerticalLayout();
+        ticketInfoPanel.setPadding(true);
+        ticketInfoPanel.setSpacing(false);
+        ticketInfoPanel.getStyle().set("overflow-y", "auto").set("background", "white");
+
+        Span typeIcon = issueTypeIcon(t.getIssueType(), "18px");
+        Anchor keyLink = new Anchor(t.getUrl(), t.getKey());
+        keyLink.setTarget("_blank");
+        keyLink.getStyle()
+                .set("font-weight", "700").set("font-size", "13px")
+                .set("color", "#0052cc").set("text-decoration", "none");
+
+        Button openInJira = new Button("Open in Jira ↗",
+                ev -> UI.getCurrent().getPage().open(t.getUrl(), "_blank"));
+        openInJira.addThemeVariants(ButtonVariant.LUMO_PRIMARY, ButtonVariant.LUMO_SMALL);
+
+        Span headerSpacer = new Span();
+        headerSpacer.getStyle().set("flex", "1");
+
+        HorizontalLayout keyRow = new HorizontalLayout(typeIcon, keyLink, headerSpacer, openInJira);
+        keyRow.setAlignItems(Alignment.CENTER);
+        keyRow.setWidthFull();
+        keyRow.setSpacing(false);
+        keyRow.getStyle().set("gap", "6px");
+
+        Paragraph summary = new Paragraph(t.getSummary());
+        summary.getStyle()
+                .set("margin", "4px 0 14px 0").set("font-size", "15px")
+                .set("font-weight", "600").set("color", "#172b4d").set("line-height", "1.4");
+
+        HorizontalLayout badges = new HorizontalLayout(
+                statusBadge(t.getStatus()), priorityBadge(t.getPriority()));
+        badges.getStyle().set("gap", "6px").set("margin-bottom", "16px");
+
+        H5 ticketSection = sectionTitle("Ticket Info");
+        VerticalLayout ticketFields = fieldGroup(
+                detailRow("Project",  t.getProject()),
+                detailRowWithIcon("Type", issueTypeIcon(t.getIssueType(), "13px"), t.getIssueType()),
+                detailRow("Assignee", t.getAssignee()),
+                detailRow("Reporter", t.getReporter()),
+                detailRow("Sprint",   t.getSprint()),
+                detailRow("Due date", t.getDueDate())
+        );
+
+        H5 ttSection = sectionTitle("Time Tracking");
+        VerticalLayout ttFields = new VerticalLayout();
+        ttFields.setPadding(false);
+        ttFields.setSpacing(false);
+        ttFields.getStyle().set("gap", "4px");
+        ttFields.add(
+                detailRow("Original estimate", t.getOriginalEstimate().isBlank() ? "—" : t.getOriginalEstimate()),
+                detailRow("Time spent",        t.getTimeSpent().isBlank()        ? "—" : t.getTimeSpent()),
+                detailRow("Remaining",         t.getRemainingEstimate().isBlank() ? "—" : t.getRemainingEstimate())
+        );
+        long original = t.getOriginalEstimateSeconds();
+        long spent    = t.getTimeSpentSeconds();
+        if (original > 0) {
+            double pct  = Math.min(1.0, (double) spent / original);
+            boolean over = spent > original;
+            ProgressBar pb = new ProgressBar(0, 1, pct);
+            pb.setWidthFull();
+            pb.getStyle().set("height", "8px").set("border-radius", "4px").set("margin-top", "8px");
+            if (over) pb.getStyle().set("--lumo-primary-color", "#de350b");
+            String pctText = String.format("%.0f%% of estimate used", pct * 100);
+            if (over) pctText += " — over estimate!";
+            Span pctLabel = new Span(pctText);
+            pctLabel.getStyle().set("font-size", "11px").set("color", over ? "#bf2600" : "#6b778c");
+            ttFields.add(pb, pctLabel);
+        }
+
+        ticketInfoPanel.add(keyRow, summary, badges,
+                divider(), ticketSection, ticketFields,
+                divider(), ttSection, ttFields);
+
+        // ── Bottom panel: Confluence References (scrollable) ──────────
+        VerticalLayout confluencePanel = new VerticalLayout();
+        confluencePanel.setPadding(true);
+        confluencePanel.setSpacing(false);
+        confluencePanel.getStyle()
+                .set("overflow-y", "auto").set("background", "#f8f9fa")
+                .set("border-top", "1px solid #dfe1e6");
+
+        H5 confluenceTitle = sectionTitle("Confluence References");
+        VerticalLayout confluenceArea = new VerticalLayout();
+        confluenceArea.setPadding(false);
+        confluenceArea.setSpacing(false);
+        confluenceArea.getStyle().set("gap", "8px");
+
+        Span loadingMsg = new Span("Loading...");
+        loadingMsg.getStyle().set("color", "#6b778c").set("font-size", "12px").set("font-style", "italic");
+        confluenceArea.add(loadingMsg);
+        confluencePanel.add(confluenceTitle, confluenceArea);
+
+        // ── SplitLayout between the two panels ────────────────────────
+        SplitLayout detailSplit = new SplitLayout(ticketInfoPanel, confluencePanel);
+        detailSplit.setOrientation(SplitLayout.Orientation.VERTICAL);
+        detailSplit.setSizeFull();
+        detailSplit.setSplitterPosition(55);
+        detailPanel.add(detailSplit);
+
+        // ── Async Confluence fetch ─────────────────────────────────────
+        UI ui = UI.getCurrent();
+        String ticketKey = t.getKey();
+        List<String> descPageIds = t.getConfluencePageIds();
+
+        Runnable task = DelegatingSecurityContextRunnable.create(() -> {
+            List<String> remoteIds = jiraService.getConfluenceRemoteLinks(ticketKey);
+            LinkedHashSet<String> allIds = new LinkedHashSet<>(remoteIds);
+            allIds.addAll(descPageIds);
+
+            List<ConfluencePage> pages = allIds.stream()
+                    .map(jiraService::getConfluencePage)
+                    .filter(java.util.Objects::nonNull)
+                    .toList();
+
+            ui.access(() -> {
+                confluenceTitle.setText("Confluence References (" + pages.size() + ")");
+                confluenceArea.removeAll();
+                if (pages.isEmpty()) {
+                    Span noLinks = new Span("No Confluence pages linked to this ticket.");
+                    noLinks.getStyle().set("color", "#6b778c").set("font-size", "12px").set("font-style", "italic");
+                    confluenceArea.add(noLinks);
+                } else {
+                    pages.forEach(p -> confluenceArea.add(buildConfluenceCard(p)));
+                }
+            });
+        }, SecurityContextHolder.getContext());
+        Thread.ofVirtual().start(task);
     }
 
     private void showDetail(WorklogEntry e) {
@@ -691,6 +860,7 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
             int totalMinutes = entries.stream().mapToInt(WorklogEntry::getMinutesSpent).sum();
             totalLabel.setText("Total: " + JiraService.formatDuration(totalMinutes));
             renderGanttChart(entries, date);
+            renderTicketsToLog(date);
             if (!entries.isEmpty()) {
                 Notification.show("Loaded " + entries.size() + " worklog entries",
                         2500, Notification.Position.BOTTOM_END);
@@ -703,6 +873,229 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         } finally {
             loadingBar.setVisible(false);
         }
+    }
+
+    private void loadMyTickets() {
+        loadingBarTickets.setVisible(true);
+        try {
+            myTickets = jiraService.getMyTickets();
+        } catch (Exception ex) {
+            myTickets = List.of();
+        } finally {
+            loadingBarTickets.setVisible(false);
+        }
+    }
+
+    // ── Confluence card ───────────────────────────────────────────────
+
+    private Div buildConfluenceCard(ConfluencePage page) {
+        // Header: icon + title link
+        Span icon = new Span("📄");
+        icon.getStyle().set("font-size", "14px").set("flex-shrink", "0");
+
+        Anchor titleLink = new Anchor(page.url(), page.title());
+        titleLink.setTarget("_blank");
+        titleLink.getStyle()
+                .set("font-size", "13px").set("font-weight", "600")
+                .set("color", "#0052cc").set("text-decoration", "none")
+                .set("flex", "1").set("overflow", "hidden")
+                .set("text-overflow", "ellipsis").set("white-space", "nowrap");
+
+        HorizontalLayout header = new HorizontalLayout(icon, titleLink);
+        header.setAlignItems(Alignment.CENTER);
+        header.setWidthFull();
+        header.setSpacing(false);
+        header.getStyle().set("gap", "6px");
+
+        // Rendered HTML content — confluence body.view is already formatted
+        com.vaadin.flow.component.Html htmlContent =
+                new com.vaadin.flow.component.Html(
+                        "<div style='" +
+                        "font-size:12px;line-height:1.7;color:#172b4d;" +
+                        "font-family:inherit;" +
+                        "'>" + page.content() + "</div>");
+
+        Div contentWrapper = new Div(htmlContent);
+        contentWrapper.getStyle()
+                .set("margin-top", "8px").set("padding-top", "8px")
+                .set("border-top", "1px solid #ebecf0");
+        // Inline styles for common HTML elements inside the rendered content
+        contentWrapper.getElement().executeJs(
+                "var el = $0;" +
+                "el.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(h => {" +
+                "  h.style.fontSize='13px';h.style.fontWeight='700';" +
+                "  h.style.color='#172b4d';h.style.margin='10px 0 4px 0';" +
+                "});" +
+                "el.querySelectorAll('p').forEach(p => p.style.margin='4px 0');" +
+                "el.querySelectorAll('ul,ol').forEach(l => {l.style.paddingLeft='18px';l.style.margin='4px 0';});" +
+                "el.querySelectorAll('li').forEach(i => i.style.margin='2px 0');" +
+                "el.querySelectorAll('code,pre').forEach(c => {" +
+                "  c.style.background='#f4f5f7';c.style.borderRadius='3px';" +
+                "  c.style.padding='1px 4px';c.style.fontSize='11px';" +
+                "});" +
+                "el.querySelectorAll('a').forEach(a => {" +
+                "  a.style.color='#0052cc';a.target='_blank';" +
+                "});" +
+                "el.querySelectorAll('table').forEach(t => {" +
+                "  t.style.borderCollapse='collapse';t.style.width='100%';t.style.fontSize='11px';" +
+                "});" +
+                "el.querySelectorAll('td,th').forEach(c => {" +
+                "  c.style.border='1px solid #dfe1e6';c.style.padding='4px 8px';" +
+                "});",
+                contentWrapper.getElement());
+
+        Div card = new Div(header, contentWrapper);
+        card.getStyle()
+                .set("border", "1px solid #dfe1e6").set("border-left", "3px solid #0052cc")
+                .set("border-radius", "4px").set("padding", "10px 12px")
+                .set("background", "#f8f9fa");
+
+        return card;
+    }
+
+    // ── Tickets to Log panel ──────────────────────────────────────────
+
+    private VerticalLayout buildTicketsToLogPanel() {
+        // Header bar
+        Span titleSpan = new Span("Tickets to Log");
+        titleSpan.getStyle()
+                .set("font-size", "12px").set("font-weight", "700").set("color", "#172b4d")
+                .set("text-transform", "uppercase").set("letter-spacing", "0.5px");
+
+        ticketsToLogCount.getStyle()
+                .set("font-size", "11px").set("font-weight", "600")
+                .set("background", "#dfe1e6").set("color", "#6b778c")
+                .set("padding", "1px 7px").set("border-radius", "10px");
+
+        HorizontalLayout headerBar = new HorizontalLayout(titleSpan, ticketsToLogCount);
+        headerBar.setAlignItems(Alignment.CENTER);
+        headerBar.getStyle()
+                .set("padding", "7px 16px")
+                .set("border-bottom", "1px solid #dfe1e6")
+                .set("background", "#f4f5f7")
+                .set("flex-shrink", "0")
+                .set("gap", "8px");
+
+        loadingBarTickets.setIndeterminate(true);
+        loadingBarTickets.setVisible(false);
+        loadingBarTickets.setWidthFull();
+        loadingBarTickets.getStyle()
+                .set("height", "3px").set("border-radius", "0").set("flex-shrink", "0");
+
+        ticketsListArea.setPadding(false);
+        ticketsListArea.setSpacing(false);
+        ticketsListArea.getStyle()
+                .set("flex", "1").set("overflow-y", "auto")
+                .set("padding", "8px 12px").set("gap", "5px");
+
+        ticketsToLogPanel.setPadding(false);
+        ticketsToLogPanel.setSpacing(false);
+        ticketsToLogPanel.setSizeFull();
+        ticketsToLogPanel.getStyle().set("background", "white");
+        ticketsToLogPanel.add(headerBar, loadingBarTickets, ticketsListArea);
+        return ticketsToLogPanel;
+    }
+
+    private void renderTicketsToLog(LocalDate date) {
+        ticketsListArea.removeAll();
+
+        if (myTickets.isEmpty()) {
+            Span msg = new Span("No tickets found.");
+            msg.getStyle().set("color", "#6b778c").set("font-style", "italic").set("font-size", "13px")
+               .set("padding", "4px 0");
+            ticketsToLogCount.setText("");
+            ticketsListArea.add(msg);
+            return;
+        }
+
+        Set<String> loggedKeys = currentEntries.stream()
+                .map(WorklogEntry::getTicketKey)
+                .collect(Collectors.toSet());
+
+        // Show tickets not logged today OR still have remaining estimate
+        // Exclude tickets with "Passed QA" status
+        List<JiraTicket> toLog = myTickets.stream()
+                .filter(t -> !Set.of("passed qa", "deployed (prod)", "won't do")
+                        .contains(t.getStatus().toLowerCase()))
+                .filter(t -> !loggedKeys.contains(t.getKey()) || t.getRemainingEstimateSeconds() > 0)
+                .sorted(Comparator.comparingLong(JiraTicket::getRemainingEstimateSeconds).reversed())
+                .collect(Collectors.toList());
+
+        ticketsToLogCount.setText(String.valueOf(toLog.size()));
+
+        if (toLog.isEmpty()) {
+            ticketsToLogCount.getStyle().set("background", "#e3fcef").set("color", "#006644");
+            Span msg = new Span("All tickets logged for " + date + ".");
+            msg.getStyle().set("color", "#006644").set("font-size", "13px").set("font-weight", "600")
+               .set("padding", "4px 0");
+            ticketsListArea.add(msg);
+            return;
+        }
+
+        ticketsToLogCount.getStyle().set("background", "#dfe1e6").set("color", "#6b778c");
+        for (JiraTicket ticket : toLog) {
+            ticketsListArea.add(buildTicketToLogRow(ticket, loggedKeys.contains(ticket.getKey())));
+        }
+    }
+
+    private Div buildTicketToLogRow(JiraTicket ticket, boolean loggedToday) {
+        Div row = new Div();
+        row.getStyle()
+                .set("display", "flex").set("align-items", "center")
+                .set("gap", "8px").set("padding", "5px 8px")
+                .set("border-radius", "4px")
+                .set("border", "1px solid #dfe1e6").set("background", "white")
+                .set("margin-bottom", "4px").set("cursor", "pointer")
+                .set("transition", "background 0.12s");
+        row.getElement().addEventListener("mouseover",
+                e -> row.getStyle().set("background", "#f4f5f7"));
+        row.getElement().addEventListener("mouseout",
+                e -> row.getStyle().set("background", "white"));
+        row.addClickListener(e -> showTicketDetail(ticket));
+
+        row.add(issueTypeIcon(ticket.getIssueType(), "16px"));
+
+        // Key (plain span, not anchor — click on row handles navigation via detail panel)
+        Span keyLink = new Span(ticket.getKey());
+        keyLink.getStyle()
+                .set("font-weight", "700").set("font-size", "12px")
+                .set("color", "#0052cc").set("text-decoration", "none")
+                .set("white-space", "nowrap").set("flex-shrink", "0");
+
+        Span sumSpan = new Span(ticket.getSummary());
+        sumSpan.getStyle()
+                .set("font-size", "12px").set("color", "#172b4d")
+                .set("overflow", "hidden").set("text-overflow", "ellipsis")
+                .set("white-space", "nowrap").set("flex", "1");
+
+        Div keyAndSummary = new Div(keyLink, sumSpan);
+        keyAndSummary.getStyle()
+                .set("display", "flex").set("align-items", "center")
+                .set("gap", "6px").set("flex", "1").set("overflow", "hidden");
+        row.add(keyAndSummary);
+
+        // Status badge
+        row.add(statusBadge(ticket.getStatus()));
+
+        // Remaining estimate
+        if (ticket.getRemainingEstimateSeconds() > 0) {
+            Span rem = new Span("rem: " + ticket.getRemainingEstimate());
+            rem.getStyle()
+                    .set("font-size", "11px").set("color", "#6b778c").set("white-space", "nowrap")
+                    .set("background", "#f4f5f7").set("padding", "2px 6px").set("border-radius", "3px");
+            row.add(rem);
+        }
+
+        // "Logged today" tag when ticket is already in today's worklog but still has remaining time
+        if (loggedToday) {
+            Span loggedBadge = new Span("logged today");
+            loggedBadge.getStyle()
+                    .set("font-size", "11px").set("color", "#006644").set("white-space", "nowrap")
+                    .set("background", "#e3fcef").set("padding", "2px 6px").set("border-radius", "3px");
+            row.add(loggedBadge);
+        }
+
+        return row;
     }
 
     // ── Bar & badge color helpers ─────────────────────────────────────
