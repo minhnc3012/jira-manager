@@ -95,16 +95,9 @@ public class MainLayout extends AppLayout {
             nav.addItem(new SideNavItem("Dashboard", DashboardView.class, VaadinIcon.HOME.create()));
 
             // My Tickets & Worklog show a warning badge when Jira is not configured
-            nav.addItem(jiraNavItem("My Tickets", MainView.class,   VaadinIcon.TICKET, jiraOk));
-            nav.addItem(jiraNavItem("Worklog",    WorklogView.class, VaadinIcon.CLOCK,  jiraOk));
-
-            SideNavItem reports = new SideNavItem("Reports");
-            reports.setPrefixComponent(VaadinIcon.CHART.create());
-            reports.getStyle()
-                    .set("color", "var(--lumo-disabled-text-color)")
-                    .set("cursor", "default")
-                    .set("pointer-events", "none");
-            nav.addItem(reports);
+            nav.addItem(jiraNavItem("My Tickets",        MainView.class,           VaadinIcon.TICKET,   jiraOk));
+            nav.addItem(jiraNavItem("Worklog",           WorklogView.class,         VaadinIcon.CLOCK,    jiraOk));
+            nav.addItem(jiraNavItem("Worklog Calendar",  WorklogCalendarView.class, VaadinIcon.CALENDAR, jiraOk));
 
             SideNavItem settingsItem = new SideNavItem("Settings", SettingsView.class, VaadinIcon.COG.create());
             if (!jiraOk) {

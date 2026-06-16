@@ -128,8 +128,15 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
             event.forwardTo("settings?jira_required=true");
             return;
         }
+        List<String> dateParam = event.getLocation().getQueryParameters()
+                .getParameters().getOrDefault("date", List.of());
+        LocalDate initialDate = LocalDate.now();
+        if (!dateParam.isEmpty()) {
+            try { initialDate = LocalDate.parse(dateParam.get(0)); } catch (Exception ignored) {}
+        }
+        datePicker.setValue(initialDate);
         loadMyTickets();
-        loadWorklogs(LocalDate.now());
+        loadWorklogs(initialDate);
     }
 
     // ── Filter bar ────────────────────────────────────────────────────
