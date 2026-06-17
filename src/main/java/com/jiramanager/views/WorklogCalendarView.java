@@ -50,6 +50,7 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
     private YearMonth currentMonth = YearMonth.now();
 
     private final Span        monthLabel   = new Span();
+    private final Span        totalBadge   = new Span();
     private final Div         calendarGrid = new Div();
     private final ProgressBar loadingBar   = new ProgressBar();
 
@@ -100,7 +101,13 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
             loadMonth();
         });
 
-        HorizontalLayout nav = new HorizontalLayout(prevBtn, monthLabel, nextBtn, todayBtn);
+        totalBadge.getStyle()
+                .set("font-size", "13px").set("font-weight", "700")
+                .set("color", "#0052cc").set("background", "#e9f2ff")
+                .set("border-radius", "12px").set("padding", "4px 12px")
+                .set("margin-left", "10px").set("white-space", "nowrap");
+
+        HorizontalLayout nav = new HorizontalLayout(prevBtn, monthLabel, nextBtn, todayBtn, totalBadge);
         nav.setAlignItems(FlexComponent.Alignment.CENTER);
         nav.setSpacing(false);
         nav.getStyle().set("gap", "6px");
@@ -216,6 +223,7 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
         calendarGrid.removeAll();
         showSkeletonCells();
         loadingBar.setVisible(true);
+        totalBadge.setText("Total: …");
 
         UI ui = UI.getCurrent();
         YearMonth month = currentMonth;
@@ -283,11 +291,15 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
         // Leading blank cells
         for (int i = 1; i < startDow; i++) calendarGrid.add(emptyCell());
 
+        int totalMonthMinutes = 0;
         for (int d = 1; d <= month.lengthOfMonth(); d++) {
             LocalDate date    = month.atDay(d);
             List<WorklogEntry> entries = data.getOrDefault(date, List.of());
+            totalMonthMinutes += entries.stream().mapToInt(WorklogEntry::getMinutesSpent).sum();
             calendarGrid.add(buildDayCell(date, entries, today));
         }
+
+        totalBadge.setText("Total: " + formatMinutes(totalMonthMinutes));
     }
 
     private Div emptyCell() {
