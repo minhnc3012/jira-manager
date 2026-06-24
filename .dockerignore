@@ -1,0 +1,14 @@
+target/
+data/
+.git/
+.idea/
+*.iml
+.vscode/
+.classpath
+.factorypath
+.project
+.settings/
+.claude/
+.env
+docs/
+*.md

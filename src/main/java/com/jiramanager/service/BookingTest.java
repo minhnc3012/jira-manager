@@ -18,9 +18,9 @@ public class BookingTest {
     public static void main(String[] args) {
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("HH:mm");
 
-        // Booking A (09->11): 10h nằm trong 09-11
-        // Booking B (10->12): 10h nằm trong 10-12
-        // Booking C (11->13): 10h nằm trong 11-13
+        // Booking A (09->11): 10h falls within 09-11
+        // Booking B (10->12): 10h falls within 10-12
+        // Booking C (11->13): 10h falls within 11-13
         // "10h" here = the car stays for 10 hours inside the slot
         // So actual exit = entry + 10h, capped/stored as given range end
 
@@ -43,15 +43,15 @@ public class BookingTest {
             LocalDateTime exit  = getExitTime(bay).truncatedTo(ChronoUnit.HOURS).plusHours(1);
 //            LocalDateTime next = entry;
 //            while(next.isBefore(exit)) {
-//                events.merge(next,  1, Integer::sum);   // xe vào -> +1
+//                events.merge(next,  1, Integer::sum);   // car enters -> +1
 //                next = next.plusHours(1);
 //            }
             events.merge(entry,  1, Integer::sum);
-            events.merge(exit,  -1, Integer::sum);   // xe ra  -> -1
+            events.merge(exit,  -1, Integer::sum);   // car leaves -> -1
         }
 
         System.out.println("=== EVENTS (raw delta) ===");
-        System.out.printf("%-8s  %s%n", "Giờ", "Delta");
+        System.out.printf("%-8s  %s%n", "Time", "Delta");
         System.out.println("-------------------");
         for (Map.Entry<LocalDateTime, Integer> e : events.entrySet()) {
             String sign = e.getValue() > 0 ? "+" + e.getValue() : String.valueOf(e.getValue());
@@ -67,8 +67,8 @@ public class BookingTest {
         }
 
         System.out.println();
-        System.out.println("=== CUMULATIVE COUNTS (xe đang đậu) ===");
-        System.out.printf("%-8s  %-30s  %s%n", "Giờ", "Tính", "Kết quả");
+        System.out.println("=== CUMULATIVE COUNTS (cars parked) ===");
+        System.out.printf("%-8s  %-30s  %s%n", "Time", "Calculation", "Result");
         System.out.println("-------------------------------------------------------");
 
         // Re-compute step by step for display
@@ -77,8 +77,8 @@ public class BookingTest {
             int delta = e.getValue();
             int curr  = prev + delta;
             String sign  = delta > 0 ? "+" + delta : String.valueOf(delta);
-            String label = delta > 0 ? "(xe vào)" : "(xe ra) ";
-            System.out.printf("%-8s  %d %s %s %-10s  → %d xe%n",
+            String label = delta > 0 ? "(car enters)" : "(car leaves)";
+            System.out.printf("%-8s  %d %s %s %-10s  → %d cars%n",
                 e.getKey().format(fmt), prev, sign, label, "", curr);
             prev = curr;
         }
@@ -86,6 +86,6 @@ public class BookingTest {
         System.out.println();
         System.out.println("=== CUMULATIVE MAP (final) ===");
         events.forEach((t, c) ->
-            System.out.printf("%-8s  %d xe%n", t.format(fmt), c));
+            System.out.printf("%-8s  %d cars%n", t.format(fmt), c));
     }
 }

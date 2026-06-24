@@ -57,7 +57,7 @@ Access is role-gated: **ADMIN** users manage the user base; **USER** accounts us
 ## 4. Default Admin Account
 
 - Created automatically on first startup by `DataInitializer` (`ApplicationRunner`).
-- Email: `admin@keytechx.com` · Password: `Admin@123`
+- Email: `admin@localhost.com` · Password: `123456`
 - No-op if the account already exists (safe to restart).
 
 ---
@@ -320,7 +320,7 @@ Shown on row select; placeholder when nothing is selected. Sections:
 ### `AuthFlowTest` (integration, 10 tests)
 - `@SpringBootTest` + `@Transactional` + `@ActiveProfiles("test")`.
 - Covers: USER registration + password encoder + `loadUserByUsername` + ROLE_USER authority + full auth flow.
-- Admin tests use `admin@keytechx.com` created by `DataInitializer` (no re-register).
+- Admin tests use `admin@localhost.com` created by `DataInitializer` (no re-register).
 - Covers: admin exists after startup, ROLE_ADMIN authority, `authenticateLocal` success, wrong password rejection.
 - Covers: `SecurityContextLogoutHandler` invalidates session + clears `SecurityContext`.
 - Covers: custom `RequestCache` does not save `/logout` as redirect target.

@@ -1,0 +1,11 @@
+services:
+  jira-manager:
+    build: .
+    ports:
+      - "8888:8888"
+    volumes:
+      - jira-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  jira-data:

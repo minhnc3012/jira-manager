@@ -16,8 +16,8 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class DataInitializer implements ApplicationRunner {
 
-    private static final String ADMIN_EMAIL    = "admin@keytechx.com";
-    private static final String ADMIN_PASSWORD = "Admin@123";
+    private static final String ADMIN_EMAIL    = "admin@localhost.com";
+    private static final String ADMIN_PASSWORD = "123456";
 
     private final UserRepository userRepository;
     private final UserService    userService;

@@ -1,0 +1,5 @@
+# Vaadin/Node tooling always writes frontend files with LF, regardless of the
+# platform's autocrlf setting. Without this, every dev/build run makes
+# src/main/frontend/generated/** show up as "modified" in git due to pure
+# CRLF/LF churn on Windows (no actual content change).
+src/main/frontend/** text eol=lf
