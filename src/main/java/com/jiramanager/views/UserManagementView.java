@@ -111,15 +111,20 @@ public class UserManagementView extends VerticalLayout {
             editBtn.getElement().setAttribute("title", "Edit");
             editBtn.addClickListener(e -> openUserDialog(user));
 
+            Button resetPassBtn = new Button(VaadinIcon.KEY.create());
+            resetPassBtn.addThemeVariants(ButtonVariant.LUMO_SMALL, ButtonVariant.LUMO_TERTIARY);
+            resetPassBtn.getElement().setAttribute("title", "Reset password");
+            resetPassBtn.addClickListener(e -> openResetPasswordDialog(user));
+
             Button deleteBtn = new Button(VaadinIcon.TRASH.create());
             deleteBtn.addThemeVariants(ButtonVariant.LUMO_SMALL, ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_ERROR);
             deleteBtn.getElement().setAttribute("title", "Delete");
             deleteBtn.addClickListener(e -> confirmDelete(user));
 
-            HorizontalLayout actions = new HorizontalLayout(editBtn, deleteBtn);
+            HorizontalLayout actions = new HorizontalLayout(editBtn, resetPassBtn, deleteBtn);
             actions.setSpacing(false);
             return actions;
-        }).setHeader("Actions").setWidth("110px").setFlexGrow(0);
+        }).setHeader("Actions").setWidth("150px").setFlexGrow(0);
 
         return grid;
     }
@@ -226,6 +231,59 @@ public class UserManagementView extends VerticalLayout {
             } catch (UserService.EmailAlreadyExistsException ex) {
                 showError(errorMsg, "This email is already registered.");
             }
+        });
+
+        Button cancelBtn = new Button("Cancel", e -> dialog.close());
+        cancelBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY);
+
+        dialog.getFooter().add(cancelBtn, saveBtn);
+        dialog.open();
+    }
+
+    // ── Reset password dialog ──────────────────────────────────────────
+
+    private void openResetPasswordDialog(AppUser user) {
+        Dialog dialog = new Dialog();
+        dialog.setWidth("420px");
+        dialog.setHeaderTitle("Reset password — " + user.getFullName());
+
+        Paragraph note = new Paragraph("Set a new password for this user. The old password is not required.");
+        note.getStyle().set("color", "#6b778c").set("font-size", "13px").set("margin", "0 0 8px 0");
+
+        PasswordField newPassField = new PasswordField("New password *");
+        newPassField.setWidthFull();
+        newPassField.setHelperText("At least 8 characters");
+        PasswordField confirmPassField = new PasswordField("Confirm new password *");
+        confirmPassField.setWidthFull();
+
+        Span errorMsg = new Span();
+        errorMsg.getStyle().set("color", "var(--lumo-error-color)").set("font-size", "13px").set("display", "none");
+
+        VerticalLayout content = new VerticalLayout(note, newPassField, confirmPassField, errorMsg);
+        content.setPadding(false);
+        content.setSpacing(true);
+        dialog.add(content);
+
+        Button saveBtn = new Button("Reset password");
+        saveBtn.addThemeVariants(ButtonVariant.LUMO_PRIMARY);
+        saveBtn.addClickListener(e -> {
+            String newPass = newPassField.getValue();
+            String confirm = confirmPassField.getValue();
+
+            if (newPass.length() < 8) {
+                showError(errorMsg, "Password must be at least 8 characters");
+                return;
+            }
+            if (!newPass.equals(confirm)) {
+                showError(errorMsg, "Passwords do not match");
+                return;
+            }
+
+            userService.resetPassword(user.getId(), newPass);
+            dialog.close();
+            Notification.show("Password reset for " + user.getEmail() + ".",
+                    2500, Notification.Position.TOP_CENTER)
+                    .addThemeVariants(NotificationVariant.LUMO_SUCCESS);
         });
 
         Button cancelBtn = new Button("Cancel", e -> dialog.close());

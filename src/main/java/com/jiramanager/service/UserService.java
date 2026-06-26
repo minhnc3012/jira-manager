@@ -190,6 +190,22 @@ public class UserService {
         userRepo.deleteById(id);
     }
 
+    /**
+     * Admin-initiated password reset: sets a new password without requiring the old one.
+     * Links the LOCAL provider if the account didn't have one yet (e.g. OAuth2-only users),
+     * so the new password actually becomes usable for local sign-in.
+     */
+    @Transactional
+    public AppUser resetPassword(Long id, String newPassword) {
+        AppUser user = userRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("User not found: " + id));
+        user.setPasswordHash(passwordEncoder.encode(newPassword));
+        if (!user.hasProvider(AuthProvider.LOCAL)) {
+            linkOAuth2Provider(user, AuthProvider.LOCAL, null, user.getEmail());
+        }
+        return userRepo.save(user);
+    }
+
     // ── Result & exception types ──────────────────────────────────────
 
     /**
