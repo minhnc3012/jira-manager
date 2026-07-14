@@ -4,6 +4,7 @@ import com.jiramanager.model.AppUser;
 import com.jiramanager.model.JiraConfig;
 import com.jiramanager.repository.JiraConfigRepository;
 import com.jiramanager.service.JiraService;
+import com.jiramanager.service.JiraUserSyncRunner;
 import com.jiramanager.service.SessionUserService;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
@@ -37,16 +38,19 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
     private final JiraConfigRepository jiraConfigRepo;
     private final SessionUserService   sessionUserService;
     private final JiraService          jiraService;
+    private final JiraUserSyncRunner   jiraUserSyncRunner;
 
     // Set to true when user is redirected here from a Jira feature
     private boolean redirectedFromJiraFeature = false;
 
     public SettingsView(JiraConfigRepository jiraConfigRepo,
                         SessionUserService sessionUserService,
-                        JiraService jiraService) {
+                        JiraService jiraService,
+                        JiraUserSyncRunner jiraUserSyncRunner) {
         this.jiraConfigRepo    = jiraConfigRepo;
         this.sessionUserService = sessionUserService;
         this.jiraService        = jiraService;
+        this.jiraUserSyncRunner = jiraUserSyncRunner;
 
         setSizeFull();
         setSpacing(false);
@@ -188,10 +192,13 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
                 showStatus(statusLabel, "All fields are required.", false);
                 return;
             }
-            saveConfig(currentUser, existing, baseUrl, email, token);
+            JiraConfig saved = saveConfig(currentUser, existing, baseUrl, email, token);
             Notification.show("Settings saved.", 2500, Notification.Position.TOP_CENTER)
                     .addThemeVariants(NotificationVariant.LUMO_SUCCESS);
             showStatus(statusLabel, "Settings saved successfully.", true);
+            // Refresh the cached member list for this Jira site in the background so the
+            // Worklog / Worklog Calendar dropdown doesn't wait until the next app restart.
+            Thread.ofVirtual().start(() -> jiraUserSyncRunner.syncOne(saved));
         });
 
         HorizontalLayout buttons = new HorizontalLayout(testBtn, saveBtn);
@@ -208,21 +215,20 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
         return card;
     }
 
-    private void saveConfig(AppUser user, JiraConfig existing, String baseUrl, String email, String token) {
+    private JiraConfig saveConfig(AppUser user, JiraConfig existing, String baseUrl, String email, String token) {
         if (existing != null) {
             existing.setBaseUrl(baseUrl);
             existing.setEmail(email);
             existing.setApiToken(token);
             existing.setUpdatedAt(LocalDateTime.now());
-            jiraConfigRepo.save(existing);
-        } else {
-            jiraConfigRepo.save(JiraConfig.builder()
-                    .user(user)
-                    .baseUrl(baseUrl)
-                    .email(email)
-                    .apiToken(token)
-                    .build());
+            return jiraConfigRepo.save(existing);
         }
+        return jiraConfigRepo.save(JiraConfig.builder()
+                .user(user)
+                .baseUrl(baseUrl)
+                .email(email)
+                .apiToken(token)
+                .build());
     }
 
     private void showStatus(Span label, String message, boolean success) {

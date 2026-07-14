@@ -208,6 +208,18 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
         grid.addColumn(JiraTicket::getSummary)
                 .setHeader("Summary").setFlexGrow(3).setTooltipGenerator(JiraTicket::getSummary);
 
+        grid.addColumn(t -> timeOrDash(t.getOriginalEstimate()))
+                .setHeader("Original").setWidth("90px").setFlexGrow(0)
+                .setTextAlign(com.vaadin.flow.component.grid.ColumnTextAlign.END);
+
+        grid.addColumn(t -> timeOrDash(t.getTimeSpent()))
+                .setHeader("Logged").setWidth("90px").setFlexGrow(0)
+                .setTextAlign(com.vaadin.flow.component.grid.ColumnTextAlign.END);
+
+        grid.addColumn(t -> timeOrDash(t.getRemainingEstimate()))
+                .setHeader("Remaining").setWidth("90px").setFlexGrow(0)
+                .setTextAlign(com.vaadin.flow.component.grid.ColumnTextAlign.END);
+
         grid.addComponentColumn(t -> statusBadge(t.getStatus()))
                 .setHeader("Status").setWidth("140px").setFlexGrow(0);
 
@@ -226,6 +238,10 @@ public class MainView extends VerticalLayout implements BeforeEnterObserver {
                     this::showDetailPlaceholder
             );
         });
+    }
+
+    private String timeOrDash(String value) {
+        return value != null && !value.isBlank() ? value : "—";
     }
 
     // ── Detail panel ──────────────────────────────────────────────────

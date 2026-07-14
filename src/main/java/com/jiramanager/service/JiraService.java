@@ -3,7 +3,10 @@ package com.jiramanager.service;
 import com.jiramanager.model.AppUser;
 import com.jiramanager.model.JiraConfig;
 import com.jiramanager.model.JiraTicket;
+import com.jiramanager.model.JiraUser;
 import com.jiramanager.model.WorklogEntry;
+import com.jiramanager.model.JiraCachedUser;
+import com.jiramanager.repository.JiraCachedUserRepository;
 import com.jiramanager.repository.JiraConfigRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
@@ -29,20 +32,25 @@ import java.util.regex.Pattern;
 public class JiraService {
 
     private final JiraConfigRepository jiraConfigRepo;
+    private final JiraCachedUserRepository jiraCachedUserRepo;
     private final SessionUserService   sessionUserService;
 
     /** Non-null only when instantiated via the test constructor. */
     private ConfigContext testContext;
 
     @Autowired
-    public JiraService(JiraConfigRepository jiraConfigRepo, SessionUserService sessionUserService) {
+    public JiraService(JiraConfigRepository jiraConfigRepo,
+                        JiraCachedUserRepository jiraCachedUserRepo,
+                        SessionUserService sessionUserService) {
         this.jiraConfigRepo     = jiraConfigRepo;
+        this.jiraCachedUserRepo = jiraCachedUserRepo;
         this.sessionUserService = sessionUserService;
     }
 
     /** Package-private constructor for unit tests — accepts a pre-configured WebClient. */
     JiraService(WebClient webClient, String baseUrl) {
         this.jiraConfigRepo     = null;
+        this.jiraCachedUserRepo = null;
         this.sessionUserService = null;
         this.testContext        = new ConfigContext(webClient, baseUrl);
     }
@@ -99,6 +107,15 @@ public class JiraService {
                     "Jira configuration is incomplete. Please fill in Base URL, Email, and API Token in Settings.");
         }
 
+        return buildContext(cfg);
+    }
+
+    /**
+     * Builds a Jira API client directly from a given config, independent of the current HTTP
+     * session. Used by the background user-sync job (see {@code JiraUserSyncRunner}), which runs
+     * outside any request/session scope and must be able to target an arbitrary user's config.
+     */
+    ConfigContext buildContext(JiraConfig cfg) {
         String credentials = Base64.getEncoder()
                 .encodeToString((cfg.getEmail() + ":" + cfg.getApiToken()).getBytes());
 
@@ -156,6 +173,114 @@ public class JiraService {
         }
     }
 
+    /**
+     * Fetches a single ticket fresh from Jira (bypasses any previously-loaded ticket list).
+     * Used wherever time-tracking figures must reflect the latest state, e.g. the "Tickets to
+     * Log" panel on the Worklog view, instead of the snapshot loaded when the page was opened.
+     */
+    public JiraTicket getTicketByKey(String key) {
+        ConfigContext ctx = resolveContext();
+        try {
+            JsonNode issue = ctx.webClient().get()
+                    .uri("/rest/api/3/issue/" + key
+                            + "?fields=summary,status,priority,project,issuetype,assignee,reporter,"
+                            + "created,updated,duedate,customfield_10020,timetracking,description")
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, cr ->
+                            cr.bodyToMono(String.class).map(body -> {
+                                log.error("Jira API error fetching {} — status: {}, body: {}", key, cr.statusCode(), body);
+                                return new RuntimeException("Jira " + cr.statusCode() + ": " + body);
+                            }))
+                    .bodyToMono(JsonNode.class)
+                    .block();
+            if (issue == null) throw new RuntimeException("Empty response fetching " + key);
+            return parseTicket(issue, ctx.baseUrl());
+        } catch (JiraNotConfiguredException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Error fetching ticket {}: {}", key, e.getMessage());
+            throw new RuntimeException("Failed to fetch ticket " + key + ": " + e.getMessage(), e);
+        }
+    }
+
+    // ── Users ─────────────────────────────────────────────────────────
+
+    /** Returns the accountId + display name of the currently authenticated Jira user. */
+    public JiraUser getCurrentJiraUser() {
+        ConfigContext ctx = resolveContext();
+        JsonNode myself = ctx.webClient().get()
+                .uri("/rest/api/3/myself")
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, cr ->
+                        cr.bodyToMono(String.class).map(e ->
+                                new RuntimeException("Cannot resolve current user: " + e)))
+                .bodyToMono(JsonNode.class)
+                .block();
+        if (myself == null) throw new RuntimeException("Cannot resolve current user.");
+        return new JiraUser(myself.path("accountId").asText(""), myself.path("displayName").asText(""));
+    }
+
+    /**
+     * Returns the Jira "member" list for the current user's Jira site, read entirely from the
+     * local DB cache populated by the background sync job ({@code JiraUserSyncRunner}) — this
+     * never calls Jira live, so it stays fast regardless of how many users the site has.
+     * Always includes the current user, even if the last sync predates their account.
+     */
+    public List<JiraUser> searchAssignableUsers() {
+        AppUser user = sessionUserService.getCurrentUser();
+        if (user == null) return List.of();
+        JiraConfig cfg = jiraConfigRepo.findByUser(user).orElse(null);
+        if (cfg == null || isBlank(cfg.getBaseUrl())) return List.of();
+
+        LinkedHashMap<String, JiraUser> byId = new LinkedHashMap<>();
+        for (JiraCachedUser c : jiraCachedUserRepo.findByBaseUrlOrderByDisplayNameAsc(cfg.getBaseUrl())) {
+            byId.put(c.getAccountId(), new JiraUser(c.getAccountId(), c.getDisplayName()));
+        }
+
+        // Ensure the current user is always present, even if the cache is stale or empty
+        // (e.g. this Jira config was added after the last background sync ran).
+        try {
+            JiraUser me = getCurrentJiraUser();
+            byId.putIfAbsent(me.accountId(), me);
+        } catch (Exception ignored) {}
+
+        List<JiraUser> users = new ArrayList<>(byId.values());
+        users.sort(Comparator.comparing(JiraUser::displayName, String.CASE_INSENSITIVE_ORDER));
+        return users;
+    }
+
+    /**
+     * Fetches the live Jira user list directly from a given config, bypassing the current HTTP
+     * session entirely. Only called by the background sync job — never on a request thread —
+     * since {@code /users/search} can be slow on large Jira sites.
+     */
+    public List<JiraUser> fetchAssignableUsersFromJira(JiraConfig cfg) {
+        ConfigContext ctx = buildContext(cfg);
+        JsonNode resp = ctx.webClient().get()
+                .uri(uriBuilder -> uriBuilder.path("/rest/api/3/users/search")
+                        .queryParam("maxResults", 200)
+                        .build())
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, cr ->
+                        cr.bodyToMono(String.class).map(body ->
+                                new RuntimeException("User search error: " + body)))
+                .bodyToMono(JsonNode.class)
+                .block();
+
+        List<JiraUser> users = new ArrayList<>();
+        if (resp != null && resp.isArray()) {
+            for (JsonNode u : resp) {
+                if (!"atlassian".equals(u.path("accountType").asText())) continue;
+                if (!u.path("active").asBoolean(true)) continue;
+                String accountId = u.path("accountId").asText("");
+                String name      = u.path("displayName").asText("");
+                if (accountId.isBlank() || name.isBlank()) continue;
+                users.add(new JiraUser(accountId, name));
+            }
+        }
+        return users;
+    }
+
     // ── Worklogs ──────────────────────────────────────────────────────
 
     /**
@@ -163,19 +288,27 @@ public class JiraService {
      * sorted by start time ascending.
      */
     public List<WorklogEntry> getWorklogsForDate(LocalDate date) {
+        String accountId = getCurrentUserAccountId(resolveContext().webClient());
+        return getWorklogsForDate(date, accountId);
+    }
+
+    /**
+     * Returns all worklog entries logged by the given Jira account on the given date,
+     * sorted by start time ascending. Used by the Worklog / Worklog Calendar "member" filter
+     * to inspect a teammate's logged time.
+     */
+    public List<WorklogEntry> getWorklogsForDate(LocalDate date, String accountId) {
         ConfigContext ctx = resolveContext();
         try {
-            String accountId = getCurrentUserAccountId(ctx.webClient());
-
             String dateStr = date.toString(); // "2024-01-15"
             String searchBody = String.format("""
                     {
-                      "jql": "worklogDate = \\"%s\\" AND worklogAuthor = currentUser()",
+                      "jql": "worklogDate = \\"%s\\" AND worklogAuthor = \\"%s\\"",
                       "maxResults": 50,
                       "fields": ["summary","status","priority","project","issuetype",
                                  "assignee","reporter","timetracking","customfield_10020"]
                     }
-                    """, dateStr);
+                    """, dateStr, accountId);
 
             JsonNode searchResponse = ctx.webClient().post()
                     .uri("/rest/api/3/search/jql")

@@ -2,6 +2,7 @@ package com.jiramanager.views;
 
 import com.jiramanager.model.ConfluencePage;
 import com.jiramanager.model.JiraTicket;
+import com.jiramanager.model.JiraUser;
 import com.jiramanager.model.WorklogEntry;
 import com.jiramanager.service.JiraService;
 import com.vaadin.flow.component.UI;
@@ -9,6 +10,7 @@ import org.springframework.security.concurrent.DelegatingSecurityContextRunnable
 import org.springframework.security.core.context.SecurityContextHolder;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
+import com.vaadin.flow.component.combobox.ComboBox;
 import com.vaadin.flow.component.datepicker.DatePicker;
 import com.vaadin.flow.component.html.*;
 import com.vaadin.flow.component.icon.Icon;
@@ -68,9 +70,11 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
     private List<WorklogEntry> currentEntries = List.of();
     private Set<String>      overlappingIds = Set.of();
     private List<JiraTicket> myTickets      = List.of();
+    private JiraUser         currentJiraUser;
 
     // ── Persistent UI components ───────────────────────────────────────
-    private final DatePicker     datePicker        = new DatePicker("Date");
+    private final DatePicker         datePicker    = new DatePicker("Date");
+    private final ComboBox<JiraUser> memberFilter  = new ComboBox<>("Member");
     private final ProgressBar    loadingBar        = new ProgressBar();
     private final Span           totalLabel        = new Span();
     private final VerticalLayout chartPanel        = new VerticalLayout();
@@ -135,6 +139,7 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
             try { initialDate = LocalDate.parse(dateParam.get(0)); } catch (Exception ignored) {}
         }
         datePicker.setValue(initialDate);
+        loadMembers();
         loadMyTickets();
         loadWorklogs(initialDate);
     }
@@ -144,6 +149,17 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
     private HorizontalLayout buildFilterBar() {
         datePicker.addValueChangeListener(e -> {
             if (e.getValue() != null) loadWorklogs(e.getValue());
+        });
+
+        memberFilter.setItemLabelGenerator(JiraUser::displayName);
+        memberFilter.setWidth("220px");
+        memberFilter.setPlaceholder("Loading members...");
+        memberFilter.addValueChangeListener(e -> {
+            // Only react to user-driven changes — programmatic setValue() during initial load
+            // (loadMembers) must not trigger a duplicate fetch of loadWorklogs().
+            if (e.isFromClient() && e.getValue() != null && datePicker.getValue() != null) {
+                loadWorklogs(datePicker.getValue());
+            }
         });
 
         Button refreshBtn = new Button("Refresh", VaadinIcon.REFRESH.create());
@@ -159,7 +175,7 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         Span spacer = new Span();
         spacer.getStyle().set("flex", "1");
 
-        HorizontalLayout bar = new HorizontalLayout(datePicker, refreshBtn, spacer, totalLabel);
+        HorizontalLayout bar = new HorizontalLayout(datePicker, memberFilter, refreshBtn, spacer, totalLabel);
         bar.setWidthFull();
         bar.setAlignItems(Alignment.END);
         bar.getStyle()
@@ -535,6 +551,24 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         detailPanel.add(icon, msg);
     }
 
+    /**
+     * Refetches the ticket from Jira before showing its detail panel, so the Time Tracking
+     * figures reflect the current state rather than the snapshot taken when the page loaded
+     * (myTickets is only loaded once per page visit).
+     */
+    private void showTicketDetailLive(JiraTicket ticket) {
+        JiraTicket fresh;
+        try {
+            fresh = jiraService.getTicketByKey(ticket.getKey());
+        } catch (Exception ex) {
+            Notification n = Notification.show("Could not refresh " + ticket.getKey() + ": " + ex.getMessage(),
+                    4000, Notification.Position.BOTTOM_CENTER);
+            n.addThemeVariants(NotificationVariant.LUMO_ERROR);
+            fresh = ticket;
+        }
+        showTicketDetail(fresh);
+    }
+
     private void showTicketDetail(JiraTicket t) {
         detailPanel.removeAll();
         detailPanel.setSizeFull();
@@ -863,11 +897,19 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         selectedBar = null;
         showDetailPlaceholder();
         try {
-            List<WorklogEntry> entries = jiraService.getWorklogsForDate(date);
+            JiraUser member = memberFilter.getValue();
+            List<WorklogEntry> entries = member != null
+                    ? jiraService.getWorklogsForDate(date, member.accountId())
+                    : jiraService.getWorklogsForDate(date);
             int totalMinutes = entries.stream().mapToInt(WorklogEntry::getMinutesSpent).sum();
             totalLabel.setText("Total: " + JiraService.formatDuration(totalMinutes));
             renderGanttChart(entries, date);
-            renderTicketsToLog(date);
+            // "Tickets to Log" always tracks the logged-in user's own remaining work — when
+            // viewing a teammate's worklog, their entries must not be misread as "logged today"
+            // against the current user's ticket list.
+            boolean viewingSelf = member == null || currentJiraUser == null
+                    || member.accountId().equals(currentJiraUser.accountId());
+            renderTicketsToLog(date, viewingSelf);
             if (!entries.isEmpty()) {
                 Notification.show("Loaded " + entries.size() + " worklog entries",
                         2500, Notification.Position.BOTTOM_END);
@@ -890,6 +932,32 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
             myTickets = List.of();
         } finally {
             loadingBarTickets.setVisible(false);
+        }
+    }
+
+    /** Populates the member filter with active Jira users, defaulting to the logged-in user. */
+    private void loadMembers() {
+        try {
+            currentJiraUser = jiraService.getCurrentJiraUser();
+        } catch (Exception ex) {
+            currentJiraUser = null;
+        }
+        try {
+            List<JiraUser> users = jiraService.searchAssignableUsers();
+            memberFilter.setItems(users);
+            if (currentJiraUser != null) {
+                JiraUser toSelect = users.stream()
+                        .filter(u -> u.accountId().equals(currentJiraUser.accountId()))
+                        .findFirst()
+                        .orElse(currentJiraUser);
+                memberFilter.setValue(toSelect);
+            } else if (!users.isEmpty()) {
+                memberFilter.setValue(users.get(0));
+            }
+        } catch (Exception ex) {
+            Notification n = Notification.show("Could not load member list: " + ex.getMessage(),
+                    3000, Notification.Position.BOTTOM_END);
+            n.addThemeVariants(NotificationVariant.LUMO_ERROR);
         }
     }
 
@@ -1003,7 +1071,7 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
         return ticketsToLogPanel;
     }
 
-    private void renderTicketsToLog(LocalDate date) {
+    private void renderTicketsToLog(LocalDate date, boolean viewingSelf) {
         ticketsListArea.removeAll();
 
         if (myTickets.isEmpty()) {
@@ -1015,9 +1083,10 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
             return;
         }
 
-        Set<String> loggedKeys = currentEntries.stream()
-                .map(WorklogEntry::getTicketKey)
-                .collect(Collectors.toSet());
+        // Only derived from currentEntries when currentEntries belongs to the logged-in user.
+        Set<String> loggedKeys = viewingSelf
+                ? currentEntries.stream().map(WorklogEntry::getTicketKey).collect(Collectors.toSet())
+                : Set.of();
 
         // Show tickets not logged today OR still have remaining estimate
         // Exclude tickets with "Passed QA" status
@@ -1058,7 +1127,7 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
                 e -> row.getStyle().set("background", "#f4f5f7"));
         row.getElement().addEventListener("mouseout",
                 e -> row.getStyle().set("background", "white"));
-        row.addClickListener(e -> showTicketDetail(ticket));
+        row.addClickListener(e -> showTicketDetailLive(ticket));
 
         row.add(issueTypeIcon(ticket.getIssueType(), "16px"));
 

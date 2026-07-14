@@ -1,11 +1,13 @@
 package com.jiramanager.views;
 
+import com.jiramanager.model.JiraUser;
 import com.jiramanager.model.WorklogEntry;
 import com.jiramanager.service.JiraService;
 import com.jiramanager.service.WorklogOverlapDetector;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
+import com.vaadin.flow.component.combobox.ComboBox;
 import com.vaadin.flow.component.html.*;
 import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.orderedlayout.FlexComponent;
@@ -48,11 +50,13 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
     private final JiraService jiraService;
 
     private YearMonth currentMonth = YearMonth.now();
+    private JiraUser  currentJiraUser;
 
     private final Span        monthLabel   = new Span();
     private final Span        totalBadge   = new Span();
     private final Div         calendarGrid = new Div();
     private final ProgressBar loadingBar   = new ProgressBar();
+    private final ComboBox<JiraUser> memberFilter = new ComboBox<>();
 
     public WorklogCalendarView(JiraService jiraService) {
         this.jiraService = jiraService;
@@ -73,7 +77,32 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
         }
         currentMonth = YearMonth.now();
         monthLabel.setText(currentMonth.format(MONTH_FMT));
+        loadMembers();
         loadMonth();
+    }
+
+    /** Populates the member filter with active Jira users, defaulting to the logged-in user. */
+    private void loadMembers() {
+        try {
+            currentJiraUser = jiraService.getCurrentJiraUser();
+        } catch (Exception ex) {
+            currentJiraUser = null;
+        }
+        try {
+            List<JiraUser> users = jiraService.searchAssignableUsers();
+            memberFilter.setItems(users);
+            if (currentJiraUser != null) {
+                JiraUser toSelect = users.stream()
+                        .filter(u -> u.accountId().equals(currentJiraUser.accountId()))
+                        .findFirst()
+                        .orElse(currentJiraUser);
+                memberFilter.setValue(toSelect);
+            } else if (!users.isEmpty()) {
+                memberFilter.setValue(users.get(0));
+            }
+        } catch (Exception ignored) {
+            // Non-fatal — the calendar still loads for the current user via the accountId fallback.
+        }
     }
 
     // ── Header bar ────────────────────────────────────────────────────
@@ -107,7 +136,17 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
                 .set("border-radius", "12px").set("padding", "4px 12px")
                 .set("margin-left", "10px").set("white-space", "nowrap");
 
-        HorizontalLayout nav = new HorizontalLayout(prevBtn, monthLabel, nextBtn, todayBtn, totalBadge);
+        memberFilter.setItemLabelGenerator(JiraUser::displayName);
+        memberFilter.setPlaceholder("Loading members...");
+        memberFilter.setWidth("200px");
+        memberFilter.getStyle().set("margin-left", "10px");
+        memberFilter.addValueChangeListener(e -> {
+            // Only react to user-driven changes — programmatic setValue() during initial load
+            // (loadMembers) must not trigger a duplicate fetch of loadMonth().
+            if (e.isFromClient() && e.getValue() != null) loadMonth();
+        });
+
+        HorizontalLayout nav = new HorizontalLayout(prevBtn, monthLabel, nextBtn, todayBtn, totalBadge, memberFilter);
         nav.setAlignItems(FlexComponent.Alignment.CENTER);
         nav.setSpacing(false);
         nav.getStyle().set("gap", "6px");
@@ -227,6 +266,8 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
 
         UI ui = UI.getCurrent();
         YearMonth month = currentMonth;
+        JiraUser  member = memberFilter.getValue();
+        String    accountId = member != null ? member.accountId() : null;
 
         Runnable task = DelegatingSecurityContextRunnable.create(() -> {
             Map<LocalDate, List<WorklogEntry>> results = new ConcurrentHashMap<>();
@@ -241,7 +282,9 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
                 Thread t = Thread.ofVirtual().start(
                         DelegatingSecurityContextRunnable.create(() -> {
                             try {
-                                results.put(date, jiraService.getWorklogsForDate(date));
+                                results.put(date, accountId != null
+                                        ? jiraService.getWorklogsForDate(date, accountId)
+                                        : jiraService.getWorklogsForDate(date));
                             } catch (Exception ex) {
                                 results.put(date, List.of());
                             }

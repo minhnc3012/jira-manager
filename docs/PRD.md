@@ -1,7 +1,7 @@
 # Product Requirements Document — Jira Manager v2
 
 **Stack:** Vaadin Flow 24.6.6 · Spring Boot 3.4.3 · Spring Security · Spring Data JPA · H2 (file-based)
-**Last updated:** 2026-03-16 (issue-type icons; My Tickets time-tracking + new filters)
+**Last updated:** 2026-07-14 (My Tickets time-tracking columns; real-time Tickets-to-Log; Worklog/Worklog Calendar member filter)
 
 ---
 
@@ -130,6 +130,7 @@ All filter options are populated from the loaded ticket list (distinct, sorted).
 ### 9.2 Grid columns
 - **Key** — `[issue-type icon] KEY-123` clickable link (opens Jira in new tab). Column 140 px.
 - **Summary** — truncated, tooltip on hover.
+- **Original**, **Logged**, **Remaining** — time-tracking columns (right-aligned, 90 px each), sourced from the same `timetracking` snapshot as the rest of the row (e.g. `"4h"`, `"2h 30m"`, `"—"` when blank). Immediately follow Summary.
 - **Status** — colour-coded badge.
 - **Priority** — colour-coded badge.
 - **Project**, **Updated**, **Due date**.
@@ -186,6 +187,7 @@ Shown on row select; placeholder when nothing is selected. Sections:
 - Constants: `HOUR_PX=90`, `LABEL_PX=220`, `ROW_H=52`, `BAR_H=26`, `MIN_PX=1.5`.
 - CSS repeating-linear-gradient: strong line per hour + faint line per 5 min.
 - Date picker (default = today); user can browse any date.
+- **Member filter** (`ComboBox<JiraUser>`) next to the date picker — lets the user view a teammate's logged time. Populated from `JiraService.searchAssignableUsers()`, which reads the **DB-cached** user list (§ 12, § 13.1) rather than calling Jira live — defaults to the logged-in user (`JiraService.getCurrentJiraUser()`, one lightweight live `/myself` call). Changing date or member reloads the Gantt chart for that member's worklogs via `JiraService.getWorklogsForDate(date, accountId)`.
 
 ### 10.2 Ticket column (frozen)
 - Two-line label: **`[issue-type icon 14 px]  key`** (bold, blue) + summary (truncated, gray).
@@ -223,11 +225,28 @@ Shown on row select; placeholder when nothing is selected. Sections:
   - `overlaps(WorklogEntry a, WorklogEntry b)` → boolean pair check.
   - `findOverlapPartners(WorklogEntry target, List<WorklogEntry> all)` → partners for a specific entry.
 
-### 10.7 Jira API
-- JQL: `worklogDate = "YYYY-MM-DD" AND worklogAuthor = currentUser()`
+### 10.7 Tickets to Log panel
+- Bottom pane of the left-side vertical `SplitLayout` (Gantt chart above, this panel below).
+- Lists the **logged-in user's own** assigned tickets (`JiraService.getMyTickets()`, loaded once per page visit) that either have no worklog yet for the selected date or still have `remainingEstimateSeconds > 0`. Tickets in `Passed QA`, `Deployed (Prod)`, `Won't Do` are excluded.
+- Always scoped to the logged-in user regardless of the member filter (§ 10.1) — when viewing a teammate's Gantt chart, their entries are not read as "logged today" against the current user's own ticket list.
+- Clicking a row calls `JiraService.getTicketByKey(key)` to refetch the ticket **live** before rendering the detail panel, so the Time Tracking figures (Original / Logged / Remaining) reflect Jira's current state rather than the snapshot taken when the page loaded. Falls back to the cached ticket + an error notification if the refetch fails.
+
+### 10.8 Jira API
+- JQL (own worklogs): `worklogDate = "YYYY-MM-DD" AND worklogAuthor = currentUser()`
+- JQL (member filter): `worklogDate = "YYYY-MM-DD" AND worklogAuthor = "<accountId>"` — `JiraService.getWorklogsForDate(date, accountId)` overload.
 - Per-issue: `GET /rest/api/3/issue/{key}/worklog` filtered by `accountId` + date.
+- Single-ticket refetch: `GET /rest/api/3/issue/{key}?fields=...` (`JiraService.getTicketByKey`), used by the Tickets to Log panel.
+- User list: `JiraService.searchAssignableUsers()` reads from the local `jira_cached_users` DB cache — no live Jira call on the request path (§ 12, § 13.1). Current user resolved via `GET /rest/api/3/myself` (`JiraService.getCurrentJiraUser`).
 - Timezone: Jira timestamps converted to local `ZoneId.systemDefault()`.
 - Jira timestamp parser handles `+0700` (no colon) and `+07:00` formats.
+
+---
+
+## 10a. Worklog Calendar (`/worklog-calendar` — USER only)
+
+- Monthly grid (Mon–Sun columns) — one cell per day showing total logged hours, distinct ticket count, and a colour-coded hours bar (< 8h amber, 8–10h green, > 10h indigo).
+- **Member filter** (`ComboBox<JiraUser>`) in the header, same data source and default-to-self behaviour as the Worklog page (§ 10.1). Changing it reloads the whole month for the selected member via `JiraService.getWorklogsForDate(date, accountId)`, fetched per-day in parallel using virtual threads.
+- Clicking a day navigates to `/worklog?date=YYYY-MM-DD` (note: the Worklog page's own member filter defaults back to the logged-in user on navigation — it does not currently carry over the calendar's selected member).
 
 ---
 
@@ -297,17 +316,42 @@ Shown on row select; placeholder when nothing is selected. Sections:
 | api_token | VARCHAR(1000) | Atlassian API token |
 | updated_at | TIMESTAMP NOT NULL | |
 
+### `jira_cached_users`
+Background-synced mirror of each Jira site's user list — backs the Worklog / Worklog Calendar member filter (§ 13.1) without a live Jira call on the request path.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGINT PK | |
+| base_url | VARCHAR(500) NOT NULL | Jira site this user belongs to (not tied to a specific local `app_users` row) |
+| account_id | VARCHAR(255) NOT NULL | Jira Cloud `accountId` |
+| display_name | VARCHAR(255) NOT NULL | |
+| synced_at | TIMESTAMP NOT NULL | Last successful sync time |
+| *(unique)* | `(base_url, account_id)` | One row per user per site |
+
 ---
 
 ## 13. JiraService Architecture
 
 - `@Service` with `@Autowired` constructor (two constructors: production + package-private test constructor).
-- `ConfigContext` record `(WebClient, String baseUrl)` — built per-call from current user's `JiraConfig`.
-- `resolveContext()` — checks `testContext` first (unit tests), then loads from DB.
+- `ConfigContext` record `(WebClient, String baseUrl)` — built per-call from a `JiraConfig` via `buildContext(cfg)`.
+- `resolveContext()` — checks `testContext` first (unit tests), else loads the current session user's `JiraConfig` from DB and calls `buildContext(cfg)`.
+- `buildContext(JiraConfig cfg)` — package-private, session-independent; builds a `WebClient` directly from any given config. Lets the background sync job (§ 13.1) target an arbitrary user's Jira site outside of any HTTP session.
 - `isConfigured()` — safe check, never throws; used by nav guards and sidebar.
 - `JiraNotConfiguredException` — thrown when config is missing or incomplete.
 - `formatDuration(int minutes)` — static utility, e.g. "1h 30m", "45m", "2h".
 - `getMyTickets()` requests the `timetracking` field; `parseTicket()` maps `originalEstimate`, `timeSpent`, `remainingEstimate` (string + seconds) onto `JiraTicket`.
+- `getTicketByKey(String key)` — single-issue fetch reusing `parseTicket()`; always hits Jira fresh (no caching), used to force real-time time-tracking figures.
+- `getWorklogsForDate(LocalDate)` now delegates to `getWorklogsForDate(LocalDate, String accountId)`, resolving the current user's `accountId` first.
+
+### 13.1 Jira user cache & background sync
+- `getCurrentJiraUser()` — live `GET /rest/api/3/myself`; cheap single-object call, used only to resolve "who am I" for the member filter's default selection.
+- `searchAssignableUsers()` — **reads from the `jira_cached_users` DB table** (never calls Jira on the request path). Scoped to the current user's `JiraConfig.baseUrl`; always merges in the live current user via `getCurrentJiraUser()` in case the cache is stale or doesn't cover them yet.
+- `fetchAssignableUsersFromJira(JiraConfig cfg)` — the actual live `GET /rest/api/3/users/search` call (filtered to active `accountType=atlassian` users), built from an explicit `JiraConfig` via `buildContext()`. Only ever invoked by the sync job below, never by a view.
+- **`JiraUserSyncRunner`** (`ApplicationRunner`):
+  - On app startup, hands off to a virtual thread (`Thread.ofVirtual().start(...)`) so the sync never blocks boot or the first request.
+  - Groups all `JiraConfig` rows by `baseUrl` (one representative config per distinct Jira site, since multiple local accounts may share a site) and calls `fetchAssignableUsersFromJira()` + upserts into `jira_cached_users` for each.
+  - `syncOne(JiraConfig cfg)` is also called — again on a virtual thread — from `SettingsView` right after a user saves their Jira connection, so a newly-configured site's member list populates immediately instead of waiting for the next restart.
+  - Per-site failures are logged and skipped; they don't affect other sites or the app itself.
 
 ---
 
