@@ -4,6 +4,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.Singular;
 
+import java.time.Instant;
 import java.util.List;
 
 @Data
@@ -15,12 +16,19 @@ public class JiraTicket {
     private String statusColor;
     private String priority;
     private String project;
+    /** Jira project key (e.g. "DEMO"), distinct from {@link #project} (the project's display name). */
+    private String projectKey;
     private String issueType;
     private String assignee;
     private String reporter;
+    /** Truncated to 500 chars (+"...") for compact detail-panel display. */
     private String description;
+    /** Untruncated description text — used by Ticket Docs markdown generation. */
+    private String fullDescription;
     private String created;
     private String updated;
+    /** Raw Jira "updated" instant (null if Jira didn't return one) — used for change detection. */
+    private Instant updatedInstant;
     private String dueDate;
     private String sprint;
     private String url;

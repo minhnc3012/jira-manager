@@ -1,13 +1,13 @@
 # Product Requirements Document — Jira Manager v2
 
 **Stack:** Vaadin Flow 24.6.6 · Spring Boot 3.4.3 · Spring Security · Spring Data JPA · H2 (file-based)
-**Last updated:** 2026-07-14 (My Tickets time-tracking columns; real-time Tickets-to-Log; Worklog/Worklog Calendar member filter)
+**Last updated:** 2026-07-14 (Spaces: read-only Confluence knowledge-base sync incl. embedded Ticket Docs, title filter, 4h background job)
 
 ---
 
 ## 1. Overview
 
-Jira Manager v2 is a multi-user web application that lets each user connect their own Jira Cloud account, view their assigned tickets, and inspect daily worklogs on a Gantt-style timeline.
+Jira Manager v2 is a multi-user web application that lets each user connect their own Jira Cloud account, view their assigned tickets, inspect daily worklogs on a Gantt-style timeline, and browse the Confluence spaces tied to their projects — including generating downloadable ticket-content docs — all read-only against Jira/Confluence.
 Access is role-gated: **ADMIN** users manage the user base; **USER** accounts use the Jira features.
 
 ---
@@ -46,7 +46,7 @@ Access is role-gated: **ADMIN** users manage the user base; **USER** accounts us
 | Role  | Default | Who assigns | Accessible features |
 |-------|---------|-------------|---------------------|
 | ADMIN | No      | Admin only  | User Management, My Profile |
-| USER  | Yes     | Registration / Admin | Dashboard, My Tickets, Worklog, Reports (stub), Settings, My Profile |
+| USER  | Yes     | Registration / Admin | Dashboard, My Tickets, Worklog, Worklog Calendar, Spaces (incl. Ticket Docs), Reports (stub), Settings, My Profile |
 
 - Role is stored in `app_users.role` (VARCHAR 20, DB default `'USER'`).
 - Spring Security authority: `ROLE_ADMIN` / `ROLE_USER`.
@@ -250,6 +250,58 @@ Shown on row select; placeholder when nothing is selected. Sections:
 
 ---
 
+## 10b. Spaces (`/spaces` — USER only)
+
+Tree view of the Confluence spaces/pages relevant to the projects the current user has tickets in, **with each page's attached Ticket Docs managed inline** — there is no separate Ticket Docs page/route; a ticket doc only ever makes sense in the context of the Feature it's attached to, so selecting a Feature shows both its info and its ticket doc in one place. Every synced page is called a **Feature**. **All Jira/Confluence access anywhere in this feature is read-only (`GET` requests, or the `POST` search-JQL endpoint which is a query, never a mutation) — nothing is ever written back to Jira or Confluence.**
+
+### 10b.1 Space discovery
+- Space matching is a heuristic: for each local user with a Jira config, `JiraService.getMyTickets(cfg)` is used to collect the distinct Jira **project keys** they have tickets in (`JiraTicket.projectKey`, § 12), and each key is checked against Confluence via `JiraService.getConfluenceSpace(cfg, key)` (`GET /wiki/rest/api/space/{key}`). A match (same key) means that Confluence space is crawled; no match is silently skipped (common, not an error).
+- Matched spaces are crawled page-by-page via `JiraService.listSpacePages(cfg, spaceKey)` (`GET /wiki/rest/api/content?spaceKey=...&expand=version,ancestors`, paginated via `_links.next`), capturing each page's title, Confluence version number, "updated" timestamp (**as of the sync**, not real-time), and parent page (from `ancestors`).
+
+### 10b.2 Space picker + tree grid
+- **Space picker** — a row of clickable chips above the filter field, one per distinct `spaceKey` currently synced for this site (e.g. `DOCS (12)`), derived from the loaded Features rather than a separate query. Selecting a chip scopes everything below (filter + tree) to that one space; the selected chip is highlighted. Hidden entirely when only zero spaces are loaded. **Default: the first space (alphabetically) is auto-selected** whenever the currently-selected one becomes invalid (first load, or it disappears after a sync) — without this, mixing pages from every matched project into one tree was hard to make sense of once more than one space was being tracked.
+- `TreeGrid<ConfluenceFeature>` built from a flat list (scoped to the selected space) using `parentPageId` (handles arbitrary depth; a page whose parent wasn't itself crawled — e.g. the space's home page — is shown as a root).
+- Columns: **Folder** (page title, hierarchy column) · **Updated** (Confluence's timestamp, captured at sync time) · **Status** badge — "Updated" (amber) vs "Read" (grey).
+- **Unread logic**: a Feature is "Updated" for the current viewer whenever `feature.version > FeatureReadStatus.lastReadVersion` for that user (missing row = `0`, so a never-read Feature — including brand-new ones — starts as "Updated"). This is intentionally per-user, inbox-style: everyone sees their own read/unread state on shared content.
+- **Filter by title** — a `TextField` above the tree (debounced 250 ms), applied within the selected space. Blank shows the full hierarchy; a non-blank query switches to a **flat** list of matching Features (parent = null for all matches), because a strict hierarchical filter would hide a matching deeply-nested page whenever its ancestor's title doesn't also match — the tree can only reach a node by first expanding its parent. Flattening is what actually lets you find a specific page in a large tree.
+- The tree's item-click listener ignores a `null` clicked item (`e.getItem() == null`) rather than crashing the view — this can legitimately happen if the tree's data provider was replaced (e.g. by a sync-triggered reload, or the auto-sync-if-empty on first visit, § 10b.4) between the click firing client-side and being processed server-side.
+
+### 10b.3 Detail panel (split top/bottom)
+Selecting a Feature splits the right-hand panel into a vertical `SplitLayout`:
+- **Top — Feature info**: page title (links to Confluence) · space key · version · **Update History** (every `ConfluenceFeatureUpdateHistory` row for the page, newest first — `vX → vY`, the new Confluence "updated" timestamp, and when the sync detected it; only written when a sync finds the Confluence version increased on an *already-known* page, not on first discovery) · **Mark as read** button (sets `FeatureReadStatus.lastReadVersion = feature.version` for the current user; disabled once already read; a later real content change makes it unread again automatically).
+- **Bottom — Ticket Docs** (§ 10b.6): the selected Feature's attached ticket doc — actions + grid, no separate page chrome (no feature picker; the tree selection already scopes it).
+
+### 10b.4 Refresh
+- "Refresh" triggers `KnowledgeBaseSyncRunner.syncOne(cfg)` for the current user's site (on a virtual thread), then reloads the tree from the DB — consistent with how "Refresh" works elsewhere in the app (re-fetch from source, not just re-read the cache).
+- If nothing has been synced yet for the current site when the page loads (`loadTree()` returns 0), a sync is triggered automatically instead of leaving the page silently empty until the next scheduled cycle.
+- Saving a Jira connection in Settings also triggers `KnowledgeBaseSyncRunner.syncOne(saved)` immediately (alongside the existing `JiraUserSyncRunner` sync), so a freshly-configured or re-saved connection doesn't have to wait.
+
+### 10b.5 Manual space/page tracking (fallback for key mismatches)
+The project-key ↔ space-key auto-match (§ 10b.1) is a heuristic and has a real, common failure mode: a Jira project's key and its Confluence space's key don't match (e.g. Jira project `DEMO2` whose wiki lives in Confluence space `DOCS`). For this case, two toolbar buttons handle it — deliberately kept as two single-purpose dialogs rather than one combined "add + browse everything" dialog, which was hard to make sense of:
+
+- **"Add space/page"** — opens a form with just a Confluence URL field + Add/Cancel. Nothing else in this dialog.
+- **"Manage links"** — opens a list of every currently-tracked `ManualSyncTarget` for this site, each with **Edit** (reopens the *same* single-field form, pre-filled, in edit mode — updates the same row in place rather than deleting/recreating it; blocked if the corrected space/page is already tracked by a different row) and **Remove** (stops future syncs for that target; already-synced `ConfluenceFeature` rows are left in place, not deleted).
+- Both dialogs share one form-building method (`openTargetFormDialog(existing, onSaved)` — `existing == null` means "add"), so Add and Edit behave identically apart from which button opened them and whether a row is pre-filled.
+- **`ConfluenceLinkParser`** (pure utility, unit-tested) parses the pasted URL into one of: `SPACE` (`.../wiki/spaces/KEY`), `PAGE` (`.../wiki/spaces/KEY/pages/{id}/...`), `UNSUPPORTED_FOLDER` (`.../wiki/spaces/KEY/folder/{id}/...`), or `INVALID`.
+- A parsed `SPACE` or `PAGE` link is saved as a **`ManualSyncTarget`** (`base_url`, `space_key`, nullable `page_id`, `source_url`, `added_by_user_id`, `added_at`) and immediately triggers a sync.
+- `KnowledgeBaseSyncRunner.syncFeatures` includes manual targets alongside the auto-detected ones: manual **space** keys are unioned into the same crawl loop as auto-detected project keys (`listSpacePages`); manual **page** targets are fetched directly by ID via `JiraService.getConfluencePageDetail(cfg, pageId)` (`GET /wiki/rest/api/content/{id}?expand=version,ancestors,space`), bypassing the space-wide crawl entirely — this works even when the page's space was never matched.
+- **Folder links are explicitly rejected**, not silently ignored: Confluence's "Folder" content type (the newer content-tree grouping construct, distinct from a Page) isn't modeled by the REST API v1 endpoints this app uses (`/wiki/rest/api/content`). Supporting it would require Confluence's newer v2 API, untested against a live site — deferred rather than implemented blind. The dialog tells the user to pick a Page link inside the folder instead.
+
+### 10b.6 Ticket Docs (bottom half of the detail panel)
+Per-Feature Jira ticket collections, embedded in the split detail panel (§ 10b.3) rather than a separate page — attach one or more Jira ticket keys to the currently-selected Feature, and the system generates one `tickets.md` for it, concatenating every attached ticket's key, summary, status/priority/assignee, updated date, URL, and **full, untruncated description** (`JiraTicket.fullDescription`, § 12 — distinct from the 500-char `description` field used elsewhere) — stored locally on disk and downloadable. **Read-only against Jira**, same as § 10b — tickets are only ever fetched (`GET`/search), never modified.
+
+- **Add tickets** — a dialog with a free-text area accepting comma/newline/space-separated ticket keys. Each new key is fetched fresh via `JiraService.getTicketByKey(key)`; unknown/inaccessible keys are skipped silently rather than failing the whole batch. Runs on a virtual thread (`WorklogCalendarView`-style `DelegatingSecurityContextRunnable` + `ui.access()`), since several sequential Jira calls can take a moment.
+- **Ticket grid**: **Ticket** key column (`setFlexGrow(1)`, given nearly all the available width — it's the main identifying content in this compact panel) · **Status** badge ("Up to date" / "Changed on Jira", fixed 140px) · remove button (fixed 50px). The "last known update" timestamp column from the original standalone-page design was dropped to keep the key column readable in the narrower embedded space. Removing an item regenerates the doc immediately so the file stays in sync with the grid — the removal handler uses the view's own `selectedDoc` field rather than `item.getTicketDoc()` (the clicked Grid row is a stale object from an earlier request, so its lazy `TicketDoc` association would throw `LazyInitializationException` the moment a setter ran on it during regeneration).
+- **Regenerate** — re-fetches every attached ticket (`getTicketsByKeys`, batched) and rewrites the markdown file; clears each item's "needs regenerate" flag.
+- **Download** — `Anchor` + `StreamResource` reading the generated file straight off disk; rebuilt whenever the selected Feature (and its file) changes.
+- No separate "Sync now" button here — the page-level "Refresh" (§ 10b.4) already re-syncs both the Feature tree and ticket-doc change-detection together via `KnowledgeBaseSyncRunner.syncOne`.
+
+### 10b.7 Ticket doc change detection & notification
+- `KnowledgeBaseSyncRunner`'s background pass (§ 13.2) re-fetches every attached ticket's current Jira "updated" timestamp and compares it to `TicketDocItem.lastKnownUpdated` (captured at the last generate). A mismatch sets `needsRegenerate = true` — shown as a badge on the item and on the doc's overall status ("Regenerate recommended").
+- **Toast notification**: rather than a live cross-thread UI push (this app has no Vaadin `@Push` infrastructure, so a background-thread `ui.access()` call wouldn't render until the next round-trip anyway, and risks `UIDetachedException` if the session ended), the toast fires the next time the affected site's Spaces page is opened — `beforeEnter` checks for any `needsRegenerate && notifiedAt == null` items site-wide and shows one grouped toast, stamping `notifiedAt` so it isn't repeated.
+
+---
+
 ## 11. Navigation Layout (`MainLayout`)
 
 - `AppLayout` with drawer (left) + navbar (top).
@@ -260,9 +312,9 @@ Shown on row select; placeholder when nothing is selected. Sections:
 | Role  | Nav items shown |
 |-------|----------------|
 | ADMIN | User Management · ─── · My Profile |
-| USER  | Dashboard · My Tickets ⚠ · Worklog ⚠ · Reports (disabled) · Settings* · ─── · My Profile |
+| USER  | Dashboard · My Tickets ⚠ · Worklog ⚠ · Worklog Calendar ⚠ · Spaces ⚠ · Reports (disabled) · Settings* · ─── · My Profile |
 
-- My Tickets and Worklog show **⚠ badge** when Jira is not configured.
+- My Tickets, Worklog, Worklog Calendar, and Spaces all show **⚠ badge** when Jira is not configured (same `jiraNavItem(...)` helper). Ticket Docs has no nav item of its own — it's embedded in Spaces (§ 10b.6), reached by selecting a Feature.
 - Settings item shown in **bold primary color** when Jira is not configured.
 - Reports item is permanently disabled (styled, pointer-events: none) — planned for future.
 
@@ -296,9 +348,12 @@ Shown on row select; placeholder when nothing is selected. Sections:
 | Field | Type | Notes |
 |-------|------|-------|
 | key, summary, status, statusColor | String | |
-| priority, project, issueType | String | |
-| assignee, reporter, description | String | |
+| priority, project, projectKey, issueType | String | `project` = display name, `projectKey` = e.g. `"DEMO"` (used to match Confluence space keys, § 10b.1) |
+| assignee, reporter | String | |
+| description | String | **truncated** to 500 chars + "..." — compact detail-panel display only (My Tickets, Worklog) |
+| fullDescription | String | **untruncated** plain-text description — used only by Ticket Docs markdown generation (§ 10b.6), never for on-screen display. ADF paragraphs/headings/list items are converted to real line breaks (`extractAdfText`), not run together on one line |
 | created, updated, dueDate, sprint, url | String | |
+| updatedInstant | Instant | raw parsed `updated` timestamp (null if Jira didn't return one); used for change detection, not display |
 | originalEstimate | String | e.g. `"4h"` — from Jira `timetracking` field |
 | originalEstimateSeconds | long | raw seconds |
 | timeSpent | String | e.g. `"2h 30m"` |
@@ -328,6 +383,86 @@ Background-synced mirror of each Jira site's user list — backs the Worklog / W
 | synced_at | TIMESTAMP NOT NULL | Last successful sync time |
 | *(unique)* | `(base_url, account_id)` | One row per user per site |
 
+### `confluence_features`
+One synced Confluence page ("Feature", § 10b) per row. Scoped by `base_url`, not by local user — a site's Confluence content is shared across every local account connected to it.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGINT PK | |
+| base_url | VARCHAR(500) NOT NULL | |
+| space_key | VARCHAR(100) NOT NULL | |
+| page_id | VARCHAR(255) NOT NULL | Confluence page ID |
+| title | VARCHAR(500) NOT NULL | "folder name" in the tree grid |
+| parent_page_id | VARCHAR(255) | null = space-root page |
+| version | INT NOT NULL | Confluence version number as of last sync |
+| confluence_updated_at | TIMESTAMP NOT NULL | Confluence's own "updated" time, captured at sync time |
+| last_synced_at | TIMESTAMP NOT NULL | |
+| url | VARCHAR(1000) | |
+| *(unique)* | `(base_url, page_id)` | |
+
+### `confluence_feature_update_history`
+Append-only log of every version bump `KnowledgeBaseSyncRunner` detected on a Feature — backs the Spaces detail panel's "Update History" timeline. Never written on first discovery of a page.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGINT PK | |
+| feature_id | FK → confluence_features | |
+| old_version | INT (nullable) | |
+| new_version | INT NOT NULL | |
+| new_updated_at | TIMESTAMP NOT NULL | |
+| detected_at | TIMESTAMP NOT NULL | |
+
+### `feature_read_status`
+Per-user "mark as read" marker. A Feature is unread for a user whenever `feature.version > lastReadVersion` (no row = `0`).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGINT PK | |
+| feature_id | FK → confluence_features | |
+| user_id | FK → app_users | |
+| last_read_version | INT NOT NULL | |
+| read_at | TIMESTAMP NOT NULL | |
+| *(unique)* | `(feature_id, user_id)` | |
+
+### `ticket_docs`
+The generated `tickets.md` for one Feature (§ 10b.6). One doc per Feature.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGINT PK | |
+| feature_id | FK → confluence_features UNIQUE | |
+| file_path | VARCHAR(1000) | e.g. `./data/feature-tickets/{id}/tickets.md` |
+| generated_at | TIMESTAMP (nullable) | null until first generated |
+| generated_by_user_id | FK → app_users (nullable) | |
+
+### `ticket_doc_items`
+One attached Jira ticket per row.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGINT PK | |
+| ticket_doc_id | FK → ticket_docs | |
+| ticket_key | VARCHAR(50) NOT NULL | |
+| last_known_updated | TIMESTAMP (nullable) | Jira `updated` timestamp as of last generate |
+| needs_regenerate | BOOLEAN NOT NULL DEFAULT false | set by background sync when Jira's `updated` moves past `last_known_updated` |
+| notified_at | TIMESTAMP (nullable) | set once the "needs regenerate" toast has been shown, to avoid repeats |
+| added_at | TIMESTAMP NOT NULL | |
+| added_by_user_id | FK → app_users | |
+| *(unique)* | `(ticket_doc_id, ticket_key)` | |
+
+### `manual_sync_targets`
+Manually-tracked Confluence space/page (§ 10b.5) — the fallback for when a Jira project key doesn't match its Confluence space key.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGINT PK | |
+| base_url | VARCHAR(500) NOT NULL | |
+| space_key | VARCHAR(100) NOT NULL | |
+| page_id | VARCHAR(255) (nullable) | null = track the whole space; set = track only this one page |
+| source_url | VARCHAR(1000) | the pasted URL, kept for reference |
+| added_by_user_id | FK → app_users | |
+| added_at | TIMESTAMP NOT NULL | |
+
 ---
 
 ## 13. JiraService Architecture
@@ -341,7 +476,10 @@ Background-synced mirror of each Jira site's user list — backs the Worklog / W
 - `formatDuration(int minutes)` — static utility, e.g. "1h 30m", "45m", "2h".
 - `getMyTickets()` requests the `timetracking` field; `parseTicket()` maps `originalEstimate`, `timeSpent`, `remainingEstimate` (string + seconds) onto `JiraTicket`.
 - `getTicketByKey(String key)` — single-issue fetch reusing `parseTicket()`; always hits Jira fresh (no caching), used to force real-time time-tracking figures.
+- `getTicketByKey(JiraConfig cfg, String key)` / `getMyTickets(JiraConfig cfg)` — session-independent variants of the above, for background jobs acting on an arbitrary user's config (mirrors `fetchAssignableUsersFromJira`).
+- `getTicketsByKeys(JiraConfig cfg, List<String> keys)` — bulk JQL `key in (...)`, batched at 50 keys/call; used by the Ticket Docs change-detection pass instead of one call per ticket.
 - `getWorklogsForDate(LocalDate)` now delegates to `getWorklogsForDate(LocalDate, String accountId)`, resolving the current user's `accountId` first.
+- **Every Jira/Confluence call in this service is read-only** — `GET`, or the search endpoints' `POST` (a JQL query, not a mutation). Nothing in this codebase writes back to Jira or Confluence.
 
 ### 13.1 Jira user cache & background sync
 - `getCurrentJiraUser()` — live `GET /rest/api/3/myself`; cheap single-object call, used only to resolve "who am I" for the member filter's default selection.
@@ -353,13 +491,34 @@ Background-synced mirror of each Jira site's user list — backs the Worklog / W
   - `syncOne(JiraConfig cfg)` is also called — again on a virtual thread — from `SettingsView` right after a user saves their Jira connection, so a newly-configured site's member list populates immediately instead of waiting for the next restart.
   - Per-site failures are logged and skipped; they don't affect other sites or the app itself.
 
+### 13.2 Knowledge Base sync (Spaces + Ticket Docs)
+- `getConfluenceSpace(JiraConfig cfg, String spaceKey)` — `GET /wiki/rest/api/space/{key}`; returns `null` on 404 (no matching space — expected, not an error).
+- `listSpacePages(JiraConfig cfg, String spaceKey)` — `GET /wiki/rest/api/content?spaceKey=...&type=page&status=current&expand=version,ancestors&limit=100`, following `_links.next` until exhausted. Parent page = last element of `ancestors[]` (null = space root).
+- `getConfluencePageDetail(JiraConfig cfg, String pageId)` — `GET /wiki/rest/api/content/{id}?expand=version,ancestors,space`; fetches one page directly by ID (including its space key), used for manually-tracked pages (§ 10b.5) which bypass the space-wide crawl.
+- `ConfluenceLinkParser` (`service` package, pure/no Spring) — parses a pasted Confluence URL into `SPACE` / `PAGE` / `UNSUPPORTED_FOLDER` / `INVALID`, feeding the "Add space/page" dialog (§ 10b.5).
+- **`KnowledgeBaseSyncRunner`** (`ApplicationRunner` + `@Scheduled`), the same shape as `JiraUserSyncRunner`:
+  - `run()` hands off to a virtual thread at startup; `@Scheduled(initialDelay = 4h, fixedRate = 4h)` does the same on a recurring basis (`initialDelay`, not `0`, avoids double-firing alongside the startup run). Requires `@EnableScheduling` on `Application`.
+  - **Feature sync**: for each distinct `baseUrl`, unions the Jira project keys across every local user on that site (`getMyTickets(cfg).projectKey`) with any manually-tracked space keys (`ManualSyncTarget`, § 10b.5), checks each against Confluence (`getConfluenceSpace`), and crawls matches (`listSpacePages`) — upserting `ConfluenceFeature` rows and logging `ConfluenceFeatureUpdateHistory` on real version bumps. Manually-tracked individual pages are fetched separately via `getConfluencePageDetail`, regardless of whether their space was matched.
+  - **Ticket doc change detection**: for each site with existing `TicketDocItem`s (`TicketDocItemRepository.findByFeatureBaseUrl(baseUrl)` — a `JOIN FETCH` through `ticketDoc.feature`, required because this runs on a background virtual thread with no HTTP request/session; naively filtering `findAll()` results in Java after the query returns throws `LazyInitializationException` on the lazy `ticketDoc`/`feature` associations), bulk-refetches them (`getTicketsByKeys`) and flags `needsRegenerate` where Jira's `updated` has moved past `lastKnownUpdated`.
+  - `syncOne(JiraConfig cfg)` — targeted resync of a single site (both steps); used by the "Refresh" button on Spaces (which covers both the Feature tree and ticket-doc change detection, since Ticket Docs is embedded there — § 10b.6), the auto-sync-if-empty on first Spaces visit, and the post-Settings-save hook.
+  - One representative `JiraConfig` per site does the actual Confluence crawl and ticket-doc detection — same simplification `JiraUserSyncRunner` already accepts (permissions could differ per user on a shared site).
+
 ---
 
 ## 14. Testing
 
-### `JiraServiceTest` (unit, 12 tests)
+### `JiraServiceTest` (unit, 18 tests)
 - Uses `MockWebServer` (OkHttp) — all HTTP calls go to localhost, **never to real Jira**.
 - Covers: success parse, POST JQL endpoint, empty results, null body, 401/410/500 errors, default field values, ADF description, description truncation (500 chars + "…"), date formatting, multiple tickets.
+- Plus 6 tests for the Confluence primitives (§ 13.2): space found/404, page-tree parent-from-ancestors, pagination via `_links.next`, single-page-by-ID found/404.
+
+### `ConfluenceLinkParserTest` (unit, 7 tests)
+- No Spring context — pure unit tests.
+- Covers: page/folder/space URL shapes, space-with-trailing-slash, blank/null input, unrecognized URL.
+
+### `TicketDocMarkdownServiceTest` (unit, 4 tests)
+- No Spring context — pure unit tests, writes under a JUnit `@TempDir` (never touches the app's real `./data/` folder).
+- Covers: generated content includes ticket fields, overwrite-on-regenerate, missing-description placeholder, `fullDescription` (not the truncated `description`) is what ends up in the file.
 
 ### `AuthFlowTest` (integration, 10 tests)
 - `@SpringBootTest` + `@Transactional` + `@ActiveProfiles("test")`.
@@ -388,3 +547,7 @@ Background-synced mirror of each Jira site's user list — backs the Worklog / W
 | Worklog: create/edit/delete | Not done | Read-only view |
 | Dark mode | Not done | Uses Lumo default theme |
 | Multi-language | Not done | English only |
+| Space-key ↔ project-key matching | Heuristic + manual fallback | Auto-match is a heuristic (confirmed real-world mismatch between a Jira project key and its Confluence space key); manual override exists via "Add space/page" (§ 10b.5) |
+| Confluence Folder content type | Not supported | Folder links are explicitly rejected in "Add space/page" — Confluence's newer Folder type needs the v2 REST API, not implemented (§ 10b.5) |
+| Ticket Docs toast delivery | Not real-time | Shown on next Spaces page visit, not pushed live — no Vaadin `@Push` infrastructure exists in this app (§ 10b.7) |
+| Knowledge Base sync permissions | Simplification | One representative `JiraConfig` per site does the actual Confluence crawl / ticket refetch; a shared site's users could have differing Jira/Confluence permissions (same limitation `JiraUserSyncRunner` already accepts) |

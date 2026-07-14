@@ -16,8 +16,12 @@ import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import com.jiramanager.model.ConfluencePage;
+import com.jiramanager.model.ConfluencePageDetail;
+import com.jiramanager.model.ConfluencePageMeta;
+import com.jiramanager.model.ConfluenceSpaceInfo;
 
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -133,17 +137,31 @@ public class JiraService {
 
     // ── My Tickets ────────────────────────────────────────────────────
 
+    private static final String TICKET_FIELDS =
+            "summary,status,priority,project,issuetype,assignee,reporter,created,updated,duedate,customfield_10020,timetracking,description";
+
     public List<JiraTicket> getMyTickets() {
-        ConfigContext ctx = resolveContext();
+        return fetchMyTickets(resolveContext());
+    }
+
+    /**
+     * Session-independent variant of {@link #getMyTickets()} — used by background jobs that act
+     * on behalf of an arbitrary user's config, outside of any HTTP session (mirrors
+     * {@link #fetchAssignableUsersFromJira(JiraConfig)}).
+     */
+    public List<JiraTicket> getMyTickets(JiraConfig cfg) {
+        return fetchMyTickets(buildContext(cfg));
+    }
+
+    private List<JiraTicket> fetchMyTickets(ConfigContext ctx) {
         try {
             String requestBody = """
                     {
                       "jql": "assignee = currentUser() ORDER BY updated DESC",
                       "maxResults": 50,
-                      "fields": ["summary","status","priority","project","issuetype",
-                                 "assignee","reporter","created","updated","duedate","customfield_10020","timetracking","description"]
+                      "fields": ["%s"]
                     }
-                    """;
+                    """.formatted(String.join("\",\"", TICKET_FIELDS.split(",")));
 
             JsonNode response = ctx.webClient().post()
                     .uri("/rest/api/3/search/jql")
@@ -179,12 +197,18 @@ public class JiraService {
      * Log" panel on the Worklog view, instead of the snapshot loaded when the page was opened.
      */
     public JiraTicket getTicketByKey(String key) {
-        ConfigContext ctx = resolveContext();
+        return fetchTicket(resolveContext(), key);
+    }
+
+    /** Session-independent variant of {@link #getTicketByKey(String)} — for background jobs. */
+    public JiraTicket getTicketByKey(JiraConfig cfg, String key) {
+        return fetchTicket(buildContext(cfg), key);
+    }
+
+    private JiraTicket fetchTicket(ConfigContext ctx, String key) {
         try {
             JsonNode issue = ctx.webClient().get()
-                    .uri("/rest/api/3/issue/" + key
-                            + "?fields=summary,status,priority,project,issuetype,assignee,reporter,"
-                            + "created,updated,duedate,customfield_10020,timetracking,description")
+                    .uri("/rest/api/3/issue/" + key + "?fields=" + TICKET_FIELDS)
                     .retrieve()
                     .onStatus(HttpStatusCode::isError, cr ->
                             cr.bodyToMono(String.class).map(body -> {
@@ -200,6 +224,52 @@ public class JiraService {
         } catch (Exception e) {
             log.error("Error fetching ticket {}: {}", key, e.getMessage());
             throw new RuntimeException("Failed to fetch ticket " + key + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Bulk-fetches multiple tickets by key in as few round trips as possible (batched at 50 keys
+     * per JQL call, Jira's per-request result cap). Used by the background ticket-doc
+     * change-detection pass instead of one {@link #getTicketByKey(JiraConfig, String)} call per
+     * attached ticket. Unknown/inaccessible keys are silently omitted from the result.
+     */
+    public List<JiraTicket> getTicketsByKeys(JiraConfig cfg, List<String> keys) {
+        if (keys == null || keys.isEmpty()) return List.of();
+        ConfigContext ctx = buildContext(cfg);
+        List<JiraTicket> tickets = new ArrayList<>();
+        try {
+            for (int i = 0; i < keys.size(); i += 50) {
+                List<String> batch = keys.subList(i, Math.min(i + 50, keys.size()));
+                String jql = "key in (" + String.join(",", batch) + ")";
+                String requestBody = """
+                        {
+                          "jql": "%s",
+                          "maxResults": 50,
+                          "fields": ["%s"]
+                        }
+                        """.formatted(jql, String.join("\",\"", TICKET_FIELDS.split(",")));
+
+                JsonNode response = ctx.webClient().post()
+                        .uri("/rest/api/3/search/jql")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(requestBody)
+                        .retrieve()
+                        .onStatus(HttpStatusCode::isError, cr ->
+                                cr.bodyToMono(String.class).map(body ->
+                                        new RuntimeException("Jira " + cr.statusCode() + ": " + body)))
+                        .bodyToMono(JsonNode.class)
+                        .block();
+
+                if (response != null && response.has("issues")) {
+                    for (JsonNode issue : response.get("issues")) {
+                        tickets.add(parseTicket(issue, ctx.baseUrl()));
+                    }
+                }
+            }
+            return tickets;
+        } catch (Exception e) {
+            log.warn("Error bulk-fetching tickets {}: {}", keys, e.getMessage());
+            return tickets;
         }
     }
 
@@ -417,6 +487,7 @@ public class JiraService {
         String key = text(issue, "key");
 
         JsonNode tt = fields.path("timetracking");
+        String updatedRaw = text(fields, "updated");
 
         return JiraTicket.builder()
                 .key(key)
@@ -425,12 +496,15 @@ public class JiraService {
                 .statusColor(fields.path("status").path("statusCategory").path("colorName").asText(""))
                 .priority(fields.path("priority").path("name").asText("Medium"))
                 .project(fields.path("project").path("name").asText(""))
+                .projectKey(fields.path("project").path("key").asText(""))
                 .issueType(fields.path("issuetype").path("name").asText(""))
                 .assignee(fields.path("assignee").path("displayName").asText("Unassigned"))
                 .reporter(fields.path("reporter").path("displayName").asText(""))
                 .description(extractDescription(fields.path("description")))
+                .fullDescription(extractFullDescriptionText(fields.path("description")))
                 .created(formatDate(text(fields, "created")))
-                .updated(formatDate(text(fields, "updated")))
+                .updated(formatDate(updatedRaw))
+                .updatedInstant(updatedRaw.isBlank() ? null : parseJiraTimestamp(updatedRaw))
                 .dueDate(formatDate(text(fields, "duedate")))
                 .sprint(parseSprint(fields.path("customfield_10020")))
                 .url(baseUrl + "/browse/" + key)
@@ -581,6 +655,131 @@ public class JiraService {
     }
 
     /**
+     * Looks up a Confluence space by key — used by the background Feature-sync job to check
+     * whether a Jira project key has a matching Confluence space before crawling it.
+     * Returns null when no such space exists (a common, expected outcome, not an error).
+     */
+    public ConfluenceSpaceInfo getConfluenceSpace(JiraConfig cfg, String spaceKey) {
+        ConfigContext ctx = buildContext(cfg);
+        try {
+            JsonNode resp = ctx.webClient().get()
+                    .uri("/wiki/rest/api/space/" + spaceKey)
+                    .retrieve()
+                    .bodyToMono(JsonNode.class)
+                    .block();
+            if (resp == null) return null;
+            return new ConfluenceSpaceInfo(
+                    resp.path("key").asText(spaceKey),
+                    resp.path("id").asText(""),
+                    resp.path("name").asText(""));
+        } catch (WebClientResponseException.NotFound e) {
+            return null;
+        } catch (Exception e) {
+            log.warn("Could not look up Confluence space {}: {}", spaceKey, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Crawls every current page in a Confluence space, following pagination, and returns each
+     * page's tree position (parent from {@code ancestors}) and version metadata. Used by the
+     * background Feature-sync job to build/refresh the Spaces tree grid — never called on a
+     * request thread since a large space can take several round trips.
+     */
+    public List<ConfluencePageMeta> listSpacePages(JiraConfig cfg, String spaceKey) {
+        ConfigContext ctx = buildContext(cfg);
+        List<ConfluencePageMeta> pages = new ArrayList<>();
+        try {
+            String uri = "/wiki/rest/api/content?spaceKey=" + spaceKey
+                    + "&type=page&status=current&expand=version,ancestors&limit=100";
+
+            while (uri != null) {
+                JsonNode resp = ctx.webClient().get()
+                        .uri(uri)
+                        .retrieve()
+                        .onStatus(HttpStatusCode::isError, cr ->
+                                cr.bodyToMono(String.class).map(body ->
+                                        new RuntimeException("Confluence content list error for " + spaceKey + ": " + body)))
+                        .bodyToMono(JsonNode.class)
+                        .block();
+                if (resp == null || !resp.has("results")) break;
+
+                for (JsonNode page : resp.get("results")) {
+                    String id      = page.path("id").asText("");
+                    String title   = page.path("title").asText("");
+                    int    version = page.path("version").path("number").asInt(1);
+                    String when    = page.path("version").path("when").asText("");
+                    Instant updatedAt = when.isBlank() ? Instant.now() : parseConfluenceTimestamp(when);
+
+                    JsonNode ancestors = page.path("ancestors");
+                    String parentId = (ancestors.isArray() && !ancestors.isEmpty())
+                            ? ancestors.get(ancestors.size() - 1).path("id").asText(null)
+                            : null;
+
+                    pages.add(new ConfluencePageMeta(id, title, parentId, version, updatedAt));
+                }
+
+                String next = resp.path("_links").path("next").asText("");
+                uri = next.isBlank() ? null : next; // relative path, resolved against baseUrl
+            }
+            return pages;
+        } catch (Exception e) {
+            log.warn("Could not list pages for Confluence space {}: {}", spaceKey, e.getMessage());
+            return pages;
+        }
+    }
+
+    /**
+     * Fetches a single Confluence page by ID, including its space key — used by the manual
+     * "track this page" fallback (see {@code ManualSyncTarget}) for when a page's space key
+     * doesn't match any Jira project the user has tickets in, so the automatic space-wide crawl
+     * (`listSpacePages`) never reaches it.
+     */
+    public ConfluencePageDetail getConfluencePageDetail(JiraConfig cfg, String pageId) {
+        ConfigContext ctx = buildContext(cfg);
+        try {
+            JsonNode resp = ctx.webClient().get()
+                    .uri("/wiki/rest/api/content/" + pageId + "?expand=version,ancestors,space")
+                    .retrieve()
+                    .bodyToMono(JsonNode.class)
+                    .block();
+            if (resp == null) return null;
+
+            String spaceKey = resp.path("space").path("key").asText("");
+            String title    = resp.path("title").asText("");
+            int    version  = resp.path("version").path("number").asInt(1);
+            String when     = resp.path("version").path("when").asText("");
+            Instant updatedAt = when.isBlank() ? Instant.now() : parseConfluenceTimestamp(when);
+
+            JsonNode ancestors = resp.path("ancestors");
+            String parentId = (ancestors.isArray() && !ancestors.isEmpty())
+                    ? ancestors.get(ancestors.size() - 1).path("id").asText(null)
+                    : null;
+
+            return new ConfluencePageDetail(pageId, spaceKey, title, parentId, version, updatedAt);
+        } catch (WebClientResponseException.NotFound e) {
+            return null;
+        } catch (Exception e) {
+            log.warn("Could not fetch Confluence page detail {}: {}", pageId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** Parses a Confluence timestamp (typically "2024-01-15T10:30:00.000Z"). */
+    private Instant parseConfluenceTimestamp(String ts) {
+        try {
+            return Instant.parse(ts);
+        } catch (Exception e1) {
+            try {
+                return OffsetDateTime.parse(ts, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant();
+            } catch (Exception e2) {
+                log.warn("Could not parse Confluence timestamp '{}': {}", ts, e2.getMessage());
+                return Instant.now();
+            }
+        }
+    }
+
+    /**
      * Extracts Confluence page IDs from an ADF description node.
      * Handles both inlineCard nodes and link marks on text nodes.
      */
@@ -670,21 +869,44 @@ public class JiraService {
         return text.length() > 15000 ? text.substring(0, 15000) + "…" : text;
     }
 
+    /** Truncated to 500 chars (+"...") — for compact detail-panel display only. */
     private String extractDescription(JsonNode node) {
-        if (node == null || node.isNull() || node.isMissingNode()) return "";
-        if (node.isTextual()) {
-            String text = node.asText().trim();
-            return text.length() > 500 ? text.substring(0, 500) + "..." : text;
-        }
-        StringBuilder sb = new StringBuilder();
-        extractAdfText(node, sb);
-        String result = sb.toString().trim();
-        return result.length() > 500 ? result.substring(0, 500) + "..." : result;
+        String full = extractFullDescriptionText(node);
+        return full.length() > 500 ? full.substring(0, 500) + "..." : full;
     }
 
+    /** Full, untruncated plain-text description — used by Ticket Docs markdown generation. */
+    private String extractFullDescriptionText(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) return "";
+        if (node.isTextual()) return node.asText().trim();
+        StringBuilder sb = new StringBuilder();
+        extractAdfText(node, sb);
+        return sb.toString().replaceAll("\n{3,}", "\n\n").trim();
+    }
+
+    /** ADF block-level node types that should end with a line break in the extracted plain text. */
+    private static final Set<String> ADF_BLOCK_TYPES = Set.of(
+            "paragraph", "heading", "codeBlock", "blockquote", "listItem", "rule", "tableRow");
+
+    /**
+     * Walks an ADF (Atlassian Document Format) node tree and appends its plain text to {@code sb},
+     * preserving paragraph/heading/list-item breaks as newlines (ADF text nodes don't carry any
+     * line-break info themselves — without this, an entire multi-paragraph description collapses
+     * into one unreadable run-on line).
+     */
     private void extractAdfText(JsonNode node, StringBuilder sb) {
-        if (node.has("text")) sb.append(node.get("text").asText()).append(" ");
+        String type = node.path("type").asText("");
+
+        if ("hardBreak".equals(type)) {
+            sb.append("\n");
+            return;
+        }
+        if ("listItem".equals(type)) {
+            sb.append("- ");
+        }
+        if (node.has("text")) sb.append(node.get("text").asText());
         if (node.has("content")) for (JsonNode c : node.get("content")) extractAdfText(c, sb);
+        if (ADF_BLOCK_TYPES.contains(type)) sb.append("\n");
     }
 
     private boolean isBlank(String s) { return s == null || s.isBlank(); }

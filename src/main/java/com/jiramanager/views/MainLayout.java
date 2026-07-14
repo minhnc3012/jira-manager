@@ -98,6 +98,7 @@ public class MainLayout extends AppLayout {
             nav.addItem(jiraNavItem("My Tickets",        MainView.class,           VaadinIcon.TICKET,   jiraOk));
             nav.addItem(jiraNavItem("Worklog",           WorklogView.class,         VaadinIcon.CLOCK,    jiraOk));
             nav.addItem(jiraNavItem("Worklog Calendar",  WorklogCalendarView.class, VaadinIcon.CALENDAR, jiraOk));
+            nav.addItem(jiraNavItem("Spaces",            SpacesView.class,          VaadinIcon.SITEMAP,  jiraOk));
 
             SideNavItem settingsItem = new SideNavItem("Settings", SettingsView.class, VaadinIcon.COG.create());
             if (!jiraOk) {

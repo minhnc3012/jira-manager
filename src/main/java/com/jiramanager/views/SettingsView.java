@@ -5,6 +5,7 @@ import com.jiramanager.model.JiraConfig;
 import com.jiramanager.repository.JiraConfigRepository;
 import com.jiramanager.service.JiraService;
 import com.jiramanager.service.JiraUserSyncRunner;
+import com.jiramanager.service.KnowledgeBaseSyncRunner;
 import com.jiramanager.service.SessionUserService;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
@@ -39,6 +40,7 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
     private final SessionUserService   sessionUserService;
     private final JiraService          jiraService;
     private final JiraUserSyncRunner   jiraUserSyncRunner;
+    private final KnowledgeBaseSyncRunner knowledgeBaseSyncRunner;
 
     // Set to true when user is redirected here from a Jira feature
     private boolean redirectedFromJiraFeature = false;
@@ -46,11 +48,13 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
     public SettingsView(JiraConfigRepository jiraConfigRepo,
                         SessionUserService sessionUserService,
                         JiraService jiraService,
-                        JiraUserSyncRunner jiraUserSyncRunner) {
+                        JiraUserSyncRunner jiraUserSyncRunner,
+                        KnowledgeBaseSyncRunner knowledgeBaseSyncRunner) {
         this.jiraConfigRepo    = jiraConfigRepo;
         this.sessionUserService = sessionUserService;
         this.jiraService        = jiraService;
         this.jiraUserSyncRunner = jiraUserSyncRunner;
+        this.knowledgeBaseSyncRunner = knowledgeBaseSyncRunner;
 
         setSizeFull();
         setSpacing(false);
@@ -196,9 +200,11 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
             Notification.show("Settings saved.", 2500, Notification.Position.TOP_CENTER)
                     .addThemeVariants(NotificationVariant.LUMO_SUCCESS);
             showStatus(statusLabel, "Settings saved successfully.", true);
-            // Refresh the cached member list for this Jira site in the background so the
-            // Worklog / Worklog Calendar dropdown doesn't wait until the next app restart.
+            // Refresh the cached member list, Spaces tree, and Ticket Docs change-detection for
+            // this Jira site in the background so nothing waits until the next scheduled sync
+            // (startup, or every 4h) or a manual "Refresh"/"Sync now" click.
             Thread.ofVirtual().start(() -> jiraUserSyncRunner.syncOne(saved));
+            Thread.ofVirtual().start(() -> knowledgeBaseSyncRunner.syncOne(saved));
         });
 
         HorizontalLayout buttons = new HorizontalLayout(testBtn, saveBtn);
