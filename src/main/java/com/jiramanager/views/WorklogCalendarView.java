@@ -77,6 +77,12 @@ public class WorklogCalendarView extends VerticalLayout implements BeforeEnterOb
         }
         currentMonth = YearMonth.now();
         monthLabel.setText(currentMonth.format(MONTH_FMT));
+
+        // Member filter is hidden by default (temporarily rolled back from general availability) —
+        // append ?members=1 to the URL to reveal it for this visit. Still loaded/functional
+        // underneath either way; only the combobox's visibility is gated.
+        memberFilter.setVisible(event.getLocation().getQueryParameters().getParameters().containsKey("members"));
+
         loadMembers();
         loadMonth();
     }

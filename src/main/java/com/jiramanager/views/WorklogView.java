@@ -132,13 +132,19 @@ public class WorklogView extends VerticalLayout implements BeforeEnterObserver {
             event.forwardTo("settings?jira_required=true");
             return;
         }
-        List<String> dateParam = event.getLocation().getQueryParameters()
-                .getParameters().getOrDefault("date", List.of());
+        var queryParams = event.getLocation().getQueryParameters().getParameters();
+        List<String> dateParam = queryParams.getOrDefault("date", List.of());
         LocalDate initialDate = LocalDate.now();
         if (!dateParam.isEmpty()) {
             try { initialDate = LocalDate.parse(dateParam.get(0)); } catch (Exception ignored) {}
         }
         datePicker.setValue(initialDate);
+
+        // Member filter is hidden by default (temporarily rolled back from general availability) —
+        // append ?members=1 to the URL to reveal it for this visit. Still loaded/functional
+        // underneath either way; only the combobox's visibility is gated.
+        memberFilter.setVisible(queryParams.containsKey("members"));
+
         loadMembers();
         loadMyTickets();
         loadWorklogs(initialDate);
