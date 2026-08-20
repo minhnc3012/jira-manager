@@ -158,6 +158,18 @@ class WorklogOverlapDetectorTest {
     }
 
     @Test
+    void overlaps_touchingWithSecondJitter_returnsFalse() {
+        // A: 09:00:07–09:15:07   B: 09:15:00–10:00:00
+        // Both display as "09:00 → 09:15" / "09:15 → 10:00" (HH:mm), and truncating
+        // to the minute makes them touch exactly, not overlap. Regression test for
+        // Jira "started" timestamps carrying second-level precision.
+        WorklogEntry a = entry("A", "2025-03-15T09:00:07Z", "2025-03-15T09:15:07Z");
+        WorklogEntry b = entry("B", "2025-03-15T09:15:00Z", "2025-03-15T10:00:00Z");
+        assertThat(WorklogOverlapDetector.overlaps(a, b)).isFalse();
+        assertThat(WorklogOverlapDetector.overlaps(b, a)).isFalse();
+    }
+
+    @Test
     void overlaps_partialOverlap_returnsTrue() {
         WorklogEntry a = entry("A", "2025-03-15T08:00:00Z", "2025-03-15T09:30:00Z");
         WorklogEntry b = entry("B", "2025-03-15T09:00:00Z", "2025-03-15T10:00:00Z");

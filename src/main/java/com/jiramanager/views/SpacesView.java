@@ -3,6 +3,7 @@ package com.jiramanager.views;
 import com.jiramanager.model.AppUser;
 import com.jiramanager.model.ConfluenceFeature;
 import com.jiramanager.model.ConfluenceFeatureUpdateHistory;
+import com.jiramanager.model.FeatureDesignDoc;
 import com.jiramanager.model.FeatureReadStatus;
 import com.jiramanager.model.JiraConfig;
 import com.jiramanager.model.JiraTicket;
@@ -11,6 +12,7 @@ import com.jiramanager.model.TicketDoc;
 import com.jiramanager.model.TicketDocItem;
 import com.jiramanager.repository.ConfluenceFeatureRepository;
 import com.jiramanager.repository.ConfluenceFeatureUpdateHistoryRepository;
+import com.jiramanager.repository.FeatureDesignDocRepository;
 import com.jiramanager.repository.FeatureReadStatusRepository;
 import com.jiramanager.repository.JiraConfigRepository;
 import com.jiramanager.repository.ManualSyncTargetRepository;
@@ -19,6 +21,7 @@ import com.jiramanager.repository.TicketDocRepository;
 import com.jiramanager.service.ConfluenceLinkParser;
 import com.jiramanager.service.ConfluenceLinkParser.Kind;
 import com.jiramanager.service.ConfluenceLinkParser.ParsedLink;
+import com.jiramanager.service.FeatureDesignDocStorage;
 import com.jiramanager.service.JiraService;
 import com.jiramanager.service.KnowledgeBaseSyncRunner;
 import com.jiramanager.service.SessionUserService;
@@ -27,6 +30,7 @@ import com.vaadin.flow.component.ClickEvent;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
+import com.vaadin.flow.component.details.Details;
 import com.vaadin.flow.component.dialog.Dialog;
 import com.vaadin.flow.component.grid.Grid;
 import com.vaadin.flow.component.grid.GridVariant;
@@ -42,6 +46,8 @@ import com.vaadin.flow.component.splitlayout.SplitLayout;
 import com.vaadin.flow.component.textfield.TextArea;
 import com.vaadin.flow.component.textfield.TextField;
 import com.vaadin.flow.component.treegrid.TreeGrid;
+import com.vaadin.flow.component.upload.Upload;
+import com.vaadin.flow.component.upload.receivers.MemoryBuffer;
 import com.vaadin.flow.data.provider.hierarchy.TreeData;
 import com.vaadin.flow.data.provider.hierarchy.TreeDataProvider;
 import com.vaadin.flow.data.value.ValueChangeMode;
@@ -87,6 +93,8 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
     private final TicketDocRepository ticketDocRepo;
     private final TicketDocItemRepository ticketDocItemRepo;
     private final TicketDocMarkdownService markdownService;
+    private final FeatureDesignDocRepository designDocRepo;
+    private final FeatureDesignDocStorage designDocStorage;
     private final KnowledgeBaseSyncRunner syncRunner;
     private final SessionUserService sessionUserService;
 
@@ -119,6 +127,8 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
                        TicketDocRepository ticketDocRepo,
                        TicketDocItemRepository ticketDocItemRepo,
                        TicketDocMarkdownService markdownService,
+                       FeatureDesignDocRepository designDocRepo,
+                       FeatureDesignDocStorage designDocStorage,
                        KnowledgeBaseSyncRunner syncRunner,
                        SessionUserService sessionUserService) {
         this.jiraService = jiraService;
@@ -130,6 +140,8 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         this.ticketDocRepo = ticketDocRepo;
         this.ticketDocItemRepo = ticketDocItemRepo;
         this.markdownService = markdownService;
+        this.designDocRepo = designDocRepo;
+        this.designDocStorage = designDocStorage;
         this.syncRunner = syncRunner;
         this.sessionUserService = sessionUserService;
 
@@ -686,7 +698,118 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         markReadBtn.getStyle().set("margin-top", "20px");
         markReadBtn.addClickListener(e -> markRead(feature));
 
-        topDetailPanel.add(titleLink, meta, divider, historyTitle, historyList, markReadBtn);
+        Hr docDivider = new Hr();
+        docDivider.getStyle().set("margin", "20px 0 16px 0").set("border-color", "#dfe1e6");
+
+        topDetailPanel.add(titleLink, meta, divider, historyTitle, historyList, markReadBtn,
+                docDivider, buildDesignDocSection(feature));
+    }
+
+    // ── Design Doc (externally-generated HTML review/plan doc, uploaded per Feature) ────
+    // Every upload is a new version — nothing is overwritten, so past versions stay viewable
+    // for tracing/comparison later. The highest version number is "latest".
+
+    private VerticalLayout buildDesignDocSection(ConfluenceFeature feature) {
+        VerticalLayout section = new VerticalLayout();
+        section.setPadding(false);
+        section.setSpacing(false);
+        section.getStyle().set("gap", "6px");
+
+        H5 title = new H5("Design Doc");
+        title.getStyle().set("margin", "0").set("color", "#172b4d").set("font-size", "13px");
+
+        Span help = new Span("Upload the HTML review doc generated externally from this feature's "
+                + "Ticket Docs + Confluence content, then open it here for dev review. Each upload "
+                + "is kept as a new version — older ones stay available below.");
+        help.getStyle().set("font-size", "12px").set("color", "#6b778c").set("display", "block");
+
+        section.add(title, help);
+
+        List<FeatureDesignDoc> versions = designDocRepo.findByFeatureOrderByVersionDesc(feature);
+        FeatureDesignDoc latest = versions.isEmpty() ? null : versions.get(0);
+
+        if (latest != null) {
+            Anchor viewLink = new Anchor("/design-docs/" + feature.getId(),
+                    "Latest: v" + latest.getVersion() + " — "
+                            + (latest.getFileName() != null ? latest.getFileName() : "design doc") + " ↗");
+            viewLink.setTarget("_blank");
+            viewLink.getStyle()
+                    .set("font-weight", "600").set("font-size", "13px")
+                    .set("color", "#0052cc").set("text-decoration", "none")
+                    .set("margin-top", "4px").set("display", "inline-block");
+
+            Span uploadedMeta = new Span("Uploaded " + DATE_FMT.format(latest.getUploadedAt())
+                    + (latest.getUploadedByUser() != null ? " by " + latest.getUploadedByUser().getFirstName() : ""));
+            uploadedMeta.getStyle().set("font-size", "11px").set("color", "#6b778c").set("display", "block");
+
+            section.add(viewLink, uploadedMeta);
+        }
+
+        if (versions.size() > 1) {
+            VerticalLayout historyList = new VerticalLayout();
+            historyList.setPadding(false);
+            historyList.setSpacing(false);
+            historyList.getStyle().set("gap", "4px");
+
+            // Skip index 0 — that's "latest", already shown above.
+            for (FeatureDesignDoc old : versions.subList(1, versions.size())) {
+                Anchor oldLink = new Anchor("/design-docs/" + feature.getId() + "/" + old.getVersion(),
+                        "v" + old.getVersion() + " — " + (old.getFileName() != null ? old.getFileName() : "design doc")
+                                + "  ·  " + DATE_FMT.format(old.getUploadedAt())
+                                + (old.getUploadedByUser() != null ? " · " + old.getUploadedByUser().getFirstName() : "")
+                                + " ↗");
+                oldLink.setTarget("_blank");
+                oldLink.getStyle()
+                        .set("font-size", "12px").set("color", "#42526e").set("text-decoration", "none")
+                        .set("display", "block");
+                historyList.add(oldLink);
+            }
+
+            Details history = new Details("Version history (" + (versions.size() - 1) + " older)", historyList);
+            history.setOpened(false);
+            history.getStyle().set("margin-top", "4px");
+            section.add(history);
+        }
+
+        int nextVersion = (latest != null ? latest.getVersion() : 0) + 1;
+
+        MemoryBuffer buffer = new MemoryBuffer();
+        Upload upload = new Upload(buffer);
+        upload.setAcceptedFileTypes(".html", ".htm", "text/html");
+        upload.setMaxFiles(1);
+        upload.setMaxFileSize(20 * 1024 * 1024); // 20 MB — generous for a doc with embedded images
+        upload.setDropAllowed(true);
+        upload.getStyle().set("margin-top", "8px");
+        upload.setUploadButton(new Button(latest != null ? "Upload new version" : "Upload file"));
+
+        upload.addSucceededListener(event -> {
+            try (var in = buffer.getInputStream()) {
+                Path saved = designDocStorage.save(feature.getId(), nextVersion, event.getFileName(), in);
+
+                FeatureDesignDoc newVersion = new FeatureDesignDoc();
+                newVersion.setFeature(feature);
+                newVersion.setVersion(nextVersion);
+                newVersion.setFileName(event.getFileName());
+                newVersion.setFilePath(saved.toString());
+                newVersion.setUploadedAt(Instant.now());
+                newVersion.setUploadedByUser(sessionUserService.getCurrentUser());
+                designDocRepo.save(newVersion);
+
+                Notification.show("Uploaded as v" + nextVersion, 2500, Notification.Position.BOTTOM_END);
+                renderFeatureInfo(feature);
+            } catch (IOException ex) {
+                Notification n = Notification.show("Failed to save uploaded file: " + ex.getMessage(),
+                        4000, Notification.Position.BOTTOM_CENTER);
+                n.addThemeVariants(NotificationVariant.LUMO_ERROR);
+            }
+        });
+        upload.addFileRejectedListener(event -> {
+            Notification n = Notification.show(event.getErrorMessage(), 4000, Notification.Position.MIDDLE);
+            n.addThemeVariants(NotificationVariant.LUMO_ERROR);
+        });
+
+        section.add(upload);
+        return section;
     }
 
     private void markRead(ConfluenceFeature feature) {

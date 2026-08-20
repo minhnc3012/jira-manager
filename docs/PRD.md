@@ -10,6 +10,8 @@
 Jira Manager v2 is a multi-user web application that lets each user connect their own Jira Cloud account, view their assigned tickets, inspect daily worklogs on a Gantt-style timeline, and browse the Confluence spaces tied to their projects — including generating downloadable ticket-content docs — all read-only against Jira/Confluence.
 Access is role-gated: **ADMIN** users manage the user base; **USER** accounts use the Jira features.
 
+**Deployment model**: runs locally (single Spring Boot process, file-based H2 DB — see § 12) for a small team, not deployed as an internet-facing multi-tenant SaaS product. Its purpose is to fill specific gaps in what Jira/Confluence's own UI provides (e.g. a Gantt-style daily worklog view, cross-teammate worklog visibility, a Confluence knowledge-base tree scoped to a user's own projects, per-feature ticket/design-doc aggregation) — not to replace Jira itself. This context is why some trade-offs in § 15 (e.g. plaintext API token storage, no horizontal scaling) are acceptable for now rather than oversights.
+
 ---
 
 ## 2. Authentication & Security
@@ -287,6 +289,17 @@ The project-key ↔ space-key auto-match (§ 10b.1) is a heuristic and has a rea
 - `KnowledgeBaseSyncRunner.syncFeatures` includes manual targets alongside the auto-detected ones: manual **space** keys are unioned into the same crawl loop as auto-detected project keys (`listSpacePages`); manual **page** targets are fetched directly by ID via `JiraService.getConfluencePageDetail(cfg, pageId)` (`GET /wiki/rest/api/content/{id}?expand=version,ancestors,space`), bypassing the space-wide crawl entirely — this works even when the page's space was never matched.
 - **Folder links are explicitly rejected**, not silently ignored: Confluence's "Folder" content type (the newer content-tree grouping construct, distinct from a Page) isn't modeled by the REST API v1 endpoints this app uses (`/wiki/rest/api/content`). Supporting it would require Confluence's newer v2 API, untested against a live site — deferred rather than implemented blind. The dialog tells the user to pick a Page link inside the folder instead.
 
+### 10b.5a Design Doc upload + version history (top panel, per Feature)
+A "Design Doc" section under Update History in the top (Feature info) panel — for an HTML review/plan doc produced **outside this app** by a separate tool that reads a Feature's Ticket Docs `tickets.md` (§ 10b.6) plus its Confluence content and renders an overall implementation write-up for dev review. Every upload is kept as a new **version** rather than overwriting the previous one, so past versions stay available for later tracing/comparison.
+
+- **`FeatureDesignDoc`** (`ManyToOne` to Feature — many rows per Feature, one per version): composite unique `(feature_id, version)`, `version` (int, 1-based, increases per upload), `file_name` (original upload name, display only), `file_path`, `uploaded_at`, `uploaded_by_user_id`.
+- **Upload** — a Vaadin `Upload` component (`.html`/`.htm`, capped at 20 MB to allow embedded images/diagrams). On success the next version number is `(highest existing version for this Feature) + 1` (or `1` if none exist yet); `FeatureDesignDocStorage` writes the file to `./data/feature-design-docs/{featureId}/v{version}/{sanitizedFileName}` and **nothing is ever deleted** — each version lives in its own subdirectory. The uploaded filename is sanitized by taking only `Path.getFileName()` (strips any directory components — defends against a crafted name like `../../etc/passwd`) then stripping characters outside `[a-zA-Z0-9._-]`.
+- **Latest link** — an `Anchor` (`target="_blank"`) reading "Latest: v{N} — {fileName}" to `/design-docs/{featureId}` (always resolves to the highest version) opens the current doc in a new tab, with its uploaded-by/uploaded-at metadata underneath.
+- **Version history** — when more than one version exists, a collapsible Vaadin `Details` ("Version history (N older)", collapsed by default) lists every older version, each a separate link to `/design-docs/{featureId}/{version}` with its own filename/timestamp/uploader — lets a dev open an old version to trace what changed or investigate an issue raised against a prior doc.
+- **`DesignDocController`** (`com.jiramanager.web`, Spring MVC `@RestController`, not a Vaadin route): `GET /design-docs/{featureId}` (`viewLatest`) resolves the highest version via `findTopByFeature_IdOrderByVersionDesc`; `GET /design-docs/{featureId}/{version}` (`viewVersion`) resolves one exact version via `findByFeature_IdAndVersion`. Both share a `serve()` helper that 404s on a missing row or a file no longer present on disk, and otherwise responds with `Content-Disposition: inline` so the doc opens in-tab rather than downloading.
+- **Auth**: `/design-docs/**` isn't a Vaadin `@Route`, so it relies on `SecurityConfig`'s `VaadinWebSecurity` base behavior (`.anyRequest().authenticated()`) — verified live (unauthenticated `curl` gets a `302` to `/login`, same as every other page in this app).
+- **No `Content-Security-Policy` sandboxing — deliberate, explicit product decision, not an oversight.** The file's content is arbitrary HTML (produced by the team's own external tooling from their own Jira/Confluence data), and rendering it with full script execution on the app's own origin is a real stored-XSS-shaped risk in general. It's accepted here because this app runs **local-only for one small trusted team** (§ 1) and the uploader is that same trusted team, not an arbitrary public user. **Before this app is ever published / exposed beyond that / opened to untrusted uploaders**, reinstate a `Content-Security-Policy: sandbox` response header in `DesignDocController` (blocks script execution + cookie/session access while still rendering headings/tables/inline CSS normally — the standard mitigation for safely rendering untrusted uploaded HTML). See the class javadoc on `DesignDocController` for the exact header to add back.
+
 ### 10b.6 Ticket Docs (bottom half of the detail panel)
 Per-Feature Jira ticket collections, embedded in the split detail panel (§ 10b.3) rather than a separate page — attach one or more Jira ticket keys to the currently-selected Feature, and the system generates one `tickets.md` for it, concatenating every attached ticket's key, summary, status/priority/assignee, updated date, URL, and **full, untruncated description** (`JiraTicket.fullDescription`, § 12 — distinct from the 500-char `description` field used elsewhere) — stored locally on disk and downloadable. **Read-only against Jira**, same as § 10b — tickets are only ever fetched (`GET`/search), never modified.
 
@@ -463,6 +476,21 @@ Manually-tracked Confluence space/page (§ 10b.5) — the fallback for when a Ji
 | added_by_user_id | FK → app_users | |
 | added_at | TIMESTAMP NOT NULL | |
 
+### `feature_design_docs`
+Uploaded HTML review/plan doc versions for a Feature (§ 10b.5a), produced externally, not by this app. One row per upload — every version is kept, never overwritten.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGINT PK | |
+| feature_id | FK → confluence_features | many rows per Feature (one per version) |
+| version | INT NOT NULL | 1-based, increases per upload; composite unique with `feature_id` |
+| file_name | VARCHAR(500) | original uploaded filename, display only |
+| file_path | VARCHAR(1000) | e.g. `./data/feature-design-docs/{featureId}/v{version}/{sanitizedFileName}` |
+| uploaded_at | TIMESTAMP NOT NULL | |
+| uploaded_by_user_id | FK → app_users (nullable) | |
+
+Unique constraint: `(feature_id, version)`.
+
 ---
 
 ## 13. JiraService Architecture
@@ -520,6 +548,14 @@ Manually-tracked Confluence space/page (§ 10b.5) — the fallback for when a Ji
 - No Spring context — pure unit tests, writes under a JUnit `@TempDir` (never touches the app's real `./data/` folder).
 - Covers: generated content includes ticket fields, overwrite-on-regenerate, missing-description placeholder, `fullDescription` (not the truncated `description`) is what ends up in the file.
 
+### `FeatureDesignDocStorageTest` (unit, 4 tests)
+- No Spring context — pure unit tests, writes under a JUnit `@TempDir`.
+- Covers: file written under the per-feature-and-version directory (`{featureId}/v{version}/{fileName}`), unsafe filename sanitized (path-traversal attempt reduced to a plain filename), two versions saved for the same Feature both stay on disk and independently readable (nothing is deleted), blank filename falls back to a default name.
+
+### `DesignDocControllerTest` (unit, 5 tests)
+- No Spring context — `FeatureDesignDocRepository` mocked with Mockito, controller methods called directly (no MockMvc/HTTP layer).
+- Covers `viewLatest`: missing DB row → 404, DB row present but file missing from disk → 404, existing file → 200 with `Content-Disposition: inline` header present and (deliberately) no `Content-Security-Policy` header. Covers `viewVersion`: missing specific version → 404, existing older version → 200 serving that version's file. The authentication boundary itself (`/design-docs/**` requires login) was verified live via `curl` against a running instance rather than in this unit test, since that's `SecurityConfig`/Spring Security's behavior, not the controller's.
+
 ### `AuthFlowTest` (integration, 10 tests)
 - `@SpringBootTest` + `@Transactional` + `@ActiveProfiles("test")`.
 - Covers: USER registration + password encoder + `loadUserByUsername` + ROLE_USER authority + full auth flow.
@@ -551,3 +587,4 @@ Manually-tracked Confluence space/page (§ 10b.5) — the fallback for when a Ji
 | Confluence Folder content type | Not supported | Folder links are explicitly rejected in "Add space/page" — Confluence's newer Folder type needs the v2 REST API, not implemented (§ 10b.5) |
 | Ticket Docs toast delivery | Not real-time | Shown on next Spaces page visit, not pushed live — no Vaadin `@Push` infrastructure exists in this app (§ 10b.7) |
 | Knowledge Base sync permissions | Simplification | One representative `JiraConfig` per site does the actual Confluence crawl / ticket refetch; a shared site's users could have differing Jira/Confluence permissions (same limitation `JiraUserSyncRunner` already accepts) |
+| Design Doc XSS protection | **Deferred by explicit decision** | Served with no `Content-Security-Policy` — full script execution on this app's origin. Acceptable only because this app is local-only for one trusted team and the uploader is that same team (§ 1). **Must** add `Content-Security-Policy: sandbox` back in `DesignDocController` before any broader/public deployment (§ 10b.5a) |

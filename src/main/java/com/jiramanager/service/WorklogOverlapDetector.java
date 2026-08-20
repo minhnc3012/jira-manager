@@ -2,6 +2,8 @@ package com.jiramanager.service;
 
 import com.jiramanager.model.WorklogEntry;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 /**
@@ -10,6 +12,11 @@ import java.util.*;
  * <p>Two entries overlap when their time ranges intersect strictly:
  * <pre>  A.startTime &lt; B.endTime  AND  A.endTime &gt; B.startTime</pre>
  * Touching boundaries (A ends exactly when B starts) are <em>not</em> considered overlaps.
+ *
+ * <p>Comparisons are truncated to whole minutes before checking, since Jira's
+ * {@code started} timestamp carries second-level precision that the UI (which
+ * displays {@code HH:mm}) doesn't show — without truncation, entries that look
+ * back-to-back on screen can be flagged as overlapping by a few seconds.
  */
 public final class WorklogOverlapDetector {
 
@@ -47,9 +54,12 @@ public final class WorklogOverlapDetector {
         if (a == null || b == null) return false;
         if (a.getStartTime() == null || a.getEndTime() == null) return false;
         if (b.getStartTime() == null || b.getEndTime() == null) return false;
+        Instant aStart = a.getStartTime().truncatedTo(ChronoUnit.MINUTES);
+        Instant aEnd = a.getEndTime().truncatedTo(ChronoUnit.MINUTES);
+        Instant bStart = b.getStartTime().truncatedTo(ChronoUnit.MINUTES);
+        Instant bEnd = b.getEndTime().truncatedTo(ChronoUnit.MINUTES);
         // [a.start, a.end) ∩ [b.start, b.end) is non-empty iff a.start < b.end && a.end > b.start
-        return a.getStartTime().isBefore(b.getEndTime())
-                && a.getEndTime().isAfter(b.getStartTime());
+        return aStart.isBefore(bEnd) && aEnd.isAfter(bStart);
     }
 
     /**
