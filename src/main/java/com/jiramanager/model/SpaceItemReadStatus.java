@@ -8,24 +8,24 @@ import lombok.Setter;
 import java.time.Instant;
 
 /**
- * Per-user "mark as read" marker for a {@link ConfluenceFeature}. A feature is unread for a
- * given user whenever {@code feature.version > lastReadVersion} (or the user has no row at
- * all, treated as {@code lastReadVersion = 0}) — so a later real content change automatically
- * makes it unread again after being read.
+ * Per-user "mark as read" marker for a linked {@link SpaceItem}. An item is unread for a given
+ * user whenever {@code item.version > lastReadVersion} (or the user has no row at all, treated
+ * as {@code lastReadVersion = 0}) — so a later real content change automatically makes it unread
+ * again after being read.
  */
 @Entity
-@Table(name = "feature_read_status",
-        uniqueConstraints = @UniqueConstraint(columnNames = {"feature_id", "user_id"}))
+@Table(name = "space_item_read_status",
+        uniqueConstraints = @UniqueConstraint(columnNames = {"item_id", "user_id"}))
 @Getter @Setter @NoArgsConstructor
-public class FeatureReadStatus {
+public class SpaceItemReadStatus {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "feature_id", nullable = false)
-    private ConfluenceFeature feature;
+    @JoinColumn(name = "item_id", nullable = false)
+    private SpaceItem item;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)

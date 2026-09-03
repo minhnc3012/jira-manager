@@ -8,8 +8,8 @@ import lombok.Setter;
 import java.time.Instant;
 
 /**
- * The generated {@code tickets.md} for one {@link ConfluenceFeature} — aggregates the content of
- * every {@link TicketDocItem} attached to it. One doc per Feature (see {@code TicketDocsView}).
+ * The generated {@code tickets.md} for one {@link SpaceItem} — aggregates the content of
+ * every {@link TicketDocItem} attached to it. One doc per item (embedded in {@code SpacesView}).
  */
 @Entity
 @Table(name = "ticket_docs")
@@ -22,7 +22,7 @@ public class TicketDoc {
 
     @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "feature_id", nullable = false, unique = true)
-    private ConfluenceFeature feature;
+    private SpaceItem feature;
 
     /** Local disk path of the generated markdown file, e.g. ./data/feature-tickets/{id}/tickets.md */
     @Column(name = "file_path", length = 1000)

@@ -19,6 +19,7 @@ public interface TicketDocItemRepository extends JpaRepository<TicketDocItem, Lo
      * after the session that loaded the item has closed (e.g. from a background sync thread,
      * which isn't covered by Spring's open-in-view since it's not an HTTP request).
      */
-    @Query("SELECT i FROM TicketDocItem i JOIN FETCH i.ticketDoc d JOIN FETCH d.feature f WHERE f.baseUrl = :baseUrl")
+    @Query("SELECT i FROM TicketDocItem i JOIN FETCH i.ticketDoc d JOIN FETCH d.feature f JOIN FETCH f.space s "
+            + "WHERE s.baseUrl = :baseUrl")
     List<TicketDocItem> findByFeatureBaseUrl(@Param("baseUrl") String baseUrl);
 }

@@ -1,6 +1,6 @@
 package com.jiramanager.repository;
 
-import com.jiramanager.model.ConfluenceFeature;
+import com.jiramanager.model.SpaceItem;
 import com.jiramanager.model.FeatureDesignDoc;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -15,9 +15,9 @@ public interface FeatureDesignDocRepository extends JpaRepository<FeatureDesignD
     // rendering, and that must not be a lazy load left to happen outside this query's session.
     @Query("SELECT d FROM FeatureDesignDoc d LEFT JOIN FETCH d.uploadedByUser "
             + "WHERE d.feature = :feature ORDER BY d.version DESC")
-    List<FeatureDesignDoc> findByFeatureOrderByVersionDesc(@Param("feature") ConfluenceFeature feature);
+    List<FeatureDesignDoc> findByFeatureOrderByVersionDesc(@Param("feature") SpaceItem feature);
 
-    Optional<FeatureDesignDoc> findTopByFeatureOrderByVersionDesc(ConfluenceFeature feature);
+    Optional<FeatureDesignDoc> findTopByFeatureOrderByVersionDesc(SpaceItem feature);
     Optional<FeatureDesignDoc> findTopByFeature_IdOrderByVersionDesc(Long featureId);
     Optional<FeatureDesignDoc> findByFeature_IdAndVersion(Long featureId, int version);
 }

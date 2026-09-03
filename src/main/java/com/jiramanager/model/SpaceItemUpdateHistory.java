@@ -8,23 +8,23 @@ import lombok.Setter;
 import java.time.Instant;
 
 /**
- * Append-only log of every content change {@code KnowledgeBaseSyncRunner} detected on a
- * {@link ConfluenceFeature} (its Confluence version number increased vs. the previous sync).
- * Backs the "update history" timeline shown in the Spaces detail panel. Never written on first
- * discovery of a page — only on a real version bump on an already-known page.
+ * Append-only log of every content change {@code KnowledgeBaseSyncRunner} detected on a linked
+ * {@link SpaceItem} (its Confluence version number increased vs. the previous sync). Backs the
+ * "update history" timeline shown in the Spaces detail panel. Never written on first sync of a
+ * newly-linked item — only on a real version bump on an already-synced item.
  */
 @Entity
-@Table(name = "confluence_feature_update_history")
+@Table(name = "space_item_update_history")
 @Getter @Setter @NoArgsConstructor
-public class ConfluenceFeatureUpdateHistory {
+public class SpaceItemUpdateHistory {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "feature_id", nullable = false)
-    private ConfluenceFeature feature;
+    @JoinColumn(name = "item_id", nullable = false)
+    private SpaceItem item;
 
     @Column(name = "old_version")
     private Integer oldVersion;

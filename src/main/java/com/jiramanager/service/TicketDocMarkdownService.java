@@ -1,6 +1,6 @@
 package com.jiramanager.service;
 
-import com.jiramanager.model.ConfluenceFeature;
+import com.jiramanager.model.SpaceItem;
 import com.jiramanager.model.JiraTicket;
 import org.springframework.stereotype.Service;
 
@@ -11,10 +11,10 @@ import java.nio.file.Path;
 import java.util.List;
 
 /**
- * Generates the per-{@link ConfluenceFeature} {@code tickets.md} used by {@code TicketDocsView} —
- * concatenates every attached {@link JiraTicket}'s content into one downloadable markdown file,
- * stored locally under {@code ./data/feature-tickets/} (the app's only on-disk convention,
- * alongside the H2 database file).
+ * Generates the per-{@link SpaceItem} {@code tickets.md} used by the Ticket Docs panel embedded
+ * in {@code SpacesView} — concatenates every attached {@link JiraTicket}'s content into one
+ * downloadable markdown file, stored locally under {@code ./data/feature-tickets/} (the app's
+ * only on-disk convention, alongside the H2 database file).
  */
 @Service
 public class TicketDocMarkdownService {
@@ -34,13 +34,13 @@ public class TicketDocMarkdownService {
      * Writes {@code {baseDir}/{featureId}/tickets.md}, overwriting any previous file for the
      * same feature. Returns the written path.
      */
-    public Path generate(ConfluenceFeature feature, List<JiraTicket> tickets) throws IOException {
+    public Path generate(SpaceItem feature, List<JiraTicket> tickets) throws IOException {
         Path dir = baseDir.resolve(String.valueOf(feature.getId()));
         Files.createDirectories(dir);
         Path file = dir.resolve("tickets.md");
 
         StringBuilder sb = new StringBuilder();
-        sb.append("# ").append(feature.getTitle()).append(" — Tickets\n\n");
+        sb.append("# ").append(feature.getName()).append(" — Tickets\n\n");
 
         for (JiraTicket t : tickets) {
             sb.append("## ").append(t.getKey()).append(": ").append(t.getSummary()).append("\n");

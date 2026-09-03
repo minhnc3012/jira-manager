@@ -35,7 +35,7 @@ public class FeatureDesignDoc {
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "feature_id", nullable = false)
-    private ConfluenceFeature feature;
+    private SpaceItem feature;
 
     /** 1, 2, 3, ... per feature — the highest value for a feature is its current/latest doc. */
     @Column(nullable = false)

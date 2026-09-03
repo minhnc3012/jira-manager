@@ -1,6 +1,6 @@
 package com.jiramanager.service;
 
-import com.jiramanager.model.ConfluenceFeature;
+import com.jiramanager.model.SpaceItem;
 import com.jiramanager.model.JiraTicket;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -18,9 +18,9 @@ class TicketDocMarkdownServiceTest {
     void generate_writesMarkdownWithTicketContent(@TempDir Path tempDir) throws IOException {
         TicketDocMarkdownService service = new TicketDocMarkdownService(tempDir);
 
-        ConfluenceFeature feature = new ConfluenceFeature();
+        SpaceItem feature = new SpaceItem();
         feature.setId(999L);
-        feature.setTitle("Login Redesign");
+        feature.setName("Login Redesign");
 
         JiraTicket ticket = JiraTicket.builder()
                 .key("DEMO-1")
@@ -50,9 +50,9 @@ class TicketDocMarkdownServiceTest {
     void generate_usesFullDescription_notTruncatedDisplayCopy(@TempDir Path tempDir) throws IOException {
         TicketDocMarkdownService service = new TicketDocMarkdownService(tempDir);
 
-        ConfluenceFeature feature = new ConfluenceFeature();
+        SpaceItem feature = new SpaceItem();
         feature.setId(3L);
-        feature.setTitle("Feature C");
+        feature.setName("Feature C");
 
         String longText = "Paragraph one. ".repeat(100); // well over the 500-char display cap
         JiraTicket ticket = JiraTicket.builder()
@@ -73,9 +73,9 @@ class TicketDocMarkdownServiceTest {
     void generate_overwritesPreviousFile(@TempDir Path tempDir) throws IOException {
         TicketDocMarkdownService service = new TicketDocMarkdownService(tempDir);
 
-        ConfluenceFeature feature = new ConfluenceFeature();
+        SpaceItem feature = new SpaceItem();
         feature.setId(1L);
-        feature.setTitle("Feature A");
+        feature.setName("Feature A");
 
         JiraTicket first = JiraTicket.builder().key("A-1").summary("First").status("Open")
                 .priority("Low").assignee("X").updated("2025-01-01").url("https://x/A-1")
@@ -96,9 +96,9 @@ class TicketDocMarkdownServiceTest {
     void generate_missingDescription_usesPlaceholder(@TempDir Path tempDir) throws IOException {
         TicketDocMarkdownService service = new TicketDocMarkdownService(tempDir);
 
-        ConfluenceFeature feature = new ConfluenceFeature();
+        SpaceItem feature = new SpaceItem();
         feature.setId(2L);
-        feature.setTitle("Feature B");
+        feature.setName("Feature B");
 
         JiraTicket ticket = JiraTicket.builder().key("B-1").summary("No description")
                 .status("Open").priority("Low").assignee("X").updated("2025-01-01")

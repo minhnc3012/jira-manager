@@ -730,10 +730,9 @@ public class JiraService {
     }
 
     /**
-     * Fetches a single Confluence page by ID, including its space key — used by the manual
-     * "track this page" fallback (see {@code ManualSyncTarget}) for when a page's space key
-     * doesn't match any Jira project the user has tickets in, so the automatic space-wide crawl
-     * (`listSpacePages`) never reaches it.
+     * Fetches a single Confluence page by ID, including its space key — used to link a Spaces
+     * tree item ({@code SpaceItem}) to one specific Confluence page, and to keep that link's
+     * version/updated timestamp fresh in {@code KnowledgeBaseSyncRunner}.
      */
     public ConfluencePageDetail getConfluencePageDetail(JiraConfig cfg, String pageId) {
         ConfigContext ctx = buildContext(cfg);

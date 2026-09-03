@@ -1,21 +1,22 @@
 package com.jiramanager.views;
 
 import com.jiramanager.model.AppUser;
-import com.jiramanager.model.ConfluenceFeature;
-import com.jiramanager.model.ConfluenceFeatureUpdateHistory;
+import com.jiramanager.model.ConfluencePageDetail;
 import com.jiramanager.model.FeatureDesignDoc;
-import com.jiramanager.model.FeatureReadStatus;
 import com.jiramanager.model.JiraConfig;
 import com.jiramanager.model.JiraTicket;
-import com.jiramanager.model.ManualSyncTarget;
+import com.jiramanager.model.Space;
+import com.jiramanager.model.SpaceItem;
+import com.jiramanager.model.SpaceItemReadStatus;
+import com.jiramanager.model.SpaceItemUpdateHistory;
 import com.jiramanager.model.TicketDoc;
 import com.jiramanager.model.TicketDocItem;
-import com.jiramanager.repository.ConfluenceFeatureRepository;
-import com.jiramanager.repository.ConfluenceFeatureUpdateHistoryRepository;
 import com.jiramanager.repository.FeatureDesignDocRepository;
-import com.jiramanager.repository.FeatureReadStatusRepository;
 import com.jiramanager.repository.JiraConfigRepository;
-import com.jiramanager.repository.ManualSyncTargetRepository;
+import com.jiramanager.repository.SpaceItemReadStatusRepository;
+import com.jiramanager.repository.SpaceItemRepository;
+import com.jiramanager.repository.SpaceItemUpdateHistoryRepository;
+import com.jiramanager.repository.SpaceRepository;
 import com.jiramanager.repository.TicketDocItemRepository;
 import com.jiramanager.repository.TicketDocRepository;
 import com.jiramanager.service.ConfluenceLinkParser;
@@ -27,17 +28,23 @@ import com.jiramanager.service.KnowledgeBaseSyncRunner;
 import com.jiramanager.service.SessionUserService;
 import com.jiramanager.service.TicketDocMarkdownService;
 import com.vaadin.flow.component.ClickEvent;
+import com.vaadin.flow.component.Component;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
+import com.vaadin.flow.component.confirmdialog.ConfirmDialog;
 import com.vaadin.flow.component.details.Details;
 import com.vaadin.flow.component.dialog.Dialog;
 import com.vaadin.flow.component.grid.Grid;
 import com.vaadin.flow.component.grid.GridVariant;
+import com.vaadin.flow.component.grid.dnd.GridDropEvent;
+import com.vaadin.flow.component.grid.dnd.GridDropLocation;
+import com.vaadin.flow.component.grid.dnd.GridDropMode;
 import com.vaadin.flow.component.html.*;
 import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.component.notification.NotificationVariant;
+import com.vaadin.flow.component.orderedlayout.BoxSizing;
 import com.vaadin.flow.component.orderedlayout.FlexComponent;
 import com.vaadin.flow.component.orderedlayout.HorizontalLayout;
 import com.vaadin.flow.component.orderedlayout.VerticalLayout;
@@ -70,11 +77,14 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Tree view of Confluence spaces/pages ("Features") synced in the background by
- * {@code KnowledgeBaseSyncRunner} for the projects the current user is assigned tickets in.
- * Selecting a Feature also shows its attached Ticket Docs (§ 10c in the PRD — folded into this
- * page rather than a separate route, since a ticket doc only ever makes sense in the context of
- * the Feature it's attached to).
+ * Manual Spaces tree: the user creates/edits/deletes {@link Space}s (each roughly a project) and
+ * builds each space's tree of {@link SpaceItem}s by hand — root "+ New item", per-row "+" to add
+ * a child, per-row edit/delete, and Explorer-style drag & drop to reparent/reorder. There is no
+ * auto-discovery any more; an item only auto-syncs (version/update badge, Update History) when
+ * the user explicitly attaches it to one specific Confluence page.
+ *
+ * <p>Selecting an item also shows its attached Ticket Docs (embedded rather than a separate
+ * route, since a ticket doc only ever makes sense in the context of the item it's attached to).
  */
 @Route(value = "spaces", layout = MainLayout.class)
 @PageTitle("Spaces – Jira Manager")
@@ -86,10 +96,10 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
 
     private final JiraService jiraService;
     private final JiraConfigRepository jiraConfigRepo;
-    private final ConfluenceFeatureRepository featureRepo;
-    private final ConfluenceFeatureUpdateHistoryRepository historyRepo;
-    private final FeatureReadStatusRepository readStatusRepo;
-    private final ManualSyncTargetRepository manualSyncTargetRepo;
+    private final SpaceRepository spaceRepo;
+    private final SpaceItemRepository spaceItemRepo;
+    private final SpaceItemUpdateHistoryRepository historyRepo;
+    private final SpaceItemReadStatusRepository readStatusRepo;
     private final TicketDocRepository ticketDocRepo;
     private final TicketDocItemRepository ticketDocItemRepo;
     private final TicketDocMarkdownService markdownService;
@@ -100,7 +110,7 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
 
     private final HorizontalLayout spacesListPanel = new HorizontalLayout();
     private final TextField filterField = new TextField();
-    private final TreeGrid<ConfluenceFeature> tree = new TreeGrid<>();
+    private final TreeGrid<SpaceItem> tree = new TreeGrid<>();
     private final VerticalLayout detailPanel = new VerticalLayout();
     private final VerticalLayout topDetailPanel = new VerticalLayout();
     private final VerticalLayout ticketDocsPanel = new VerticalLayout();
@@ -109,21 +119,23 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
     private final HorizontalLayout downloadSlot = new HorizontalLayout();
     private final Span countLabel = new Span();
     private final ProgressBar loadingBar = new ProgressBar();
+    private final Button newItemBtn = new Button("New item", VaadinIcon.PLUS.create());
 
     private JiraConfig currentConfig;
-    private List<ConfluenceFeature> allFeatures = List.of();
-    private List<String> allSpaceKeys = List.of();
-    private String selectedSpaceKey;
-    private Map<Long, Integer> readVersionByFeatureId = new HashMap<>();
-    private ConfluenceFeature selectedFeature;
+    private List<Space> allSpaces = List.of();
+    private Space selectedSpace;
+    private List<SpaceItem> allItems = List.of();
+    private Map<Long, Integer> readVersionByItemId = new HashMap<>();
+    private SpaceItem selectedItem;
     private TicketDoc selectedDoc;
+    private SpaceItem draggedItem;
 
     public SpacesView(JiraService jiraService,
                        JiraConfigRepository jiraConfigRepo,
-                       ConfluenceFeatureRepository featureRepo,
-                       ConfluenceFeatureUpdateHistoryRepository historyRepo,
-                       FeatureReadStatusRepository readStatusRepo,
-                       ManualSyncTargetRepository manualSyncTargetRepo,
+                       SpaceRepository spaceRepo,
+                       SpaceItemRepository spaceItemRepo,
+                       SpaceItemUpdateHistoryRepository historyRepo,
+                       SpaceItemReadStatusRepository readStatusRepo,
                        TicketDocRepository ticketDocRepo,
                        TicketDocItemRepository ticketDocItemRepo,
                        TicketDocMarkdownService markdownService,
@@ -133,10 +145,10 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
                        SessionUserService sessionUserService) {
         this.jiraService = jiraService;
         this.jiraConfigRepo = jiraConfigRepo;
-        this.featureRepo = featureRepo;
+        this.spaceRepo = spaceRepo;
+        this.spaceItemRepo = spaceItemRepo;
         this.historyRepo = historyRepo;
         this.readStatusRepo = readStatusRepo;
-        this.manualSyncTargetRepo = manualSyncTargetRepo;
         this.ticketDocRepo = ticketDocRepo;
         this.ticketDocItemRepo = ticketDocItemRepo;
         this.markdownService = markdownService;
@@ -170,13 +182,7 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         AppUser user = sessionUserService.getCurrentUser();
         currentConfig = user != null ? jiraConfigRepo.findByUser(user).orElse(null) : null;
 
-        int found = loadTree();
-        if (found == 0) {
-            // Nothing synced yet for this site (e.g. Jira was configured after the last
-            // startup/scheduled sync) — trigger one immediately instead of leaving the page
-            // silently empty until the next 4h cycle or a manual "Refresh" click.
-            syncAndReload();
-        }
+        loadSpaces();
         notifyPendingTicketDocChanges();
     }
 
@@ -190,23 +196,26 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
 
         Button refreshBtn = new Button("Refresh", VaadinIcon.REFRESH.create());
         refreshBtn.addThemeVariants(ButtonVariant.LUMO_PRIMARY);
+        refreshBtn.setTooltipText("Re-fetch version/update status for every item linked to a Confluence page");
         refreshBtn.addClickListener(e -> syncAndReload());
 
-        Button addTargetBtn = new Button("Add space/page", VaadinIcon.PLUS.create());
-        addTargetBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY);
-        addTargetBtn.setTooltipText("Manually track a Confluence space or page, e.g. when its "
-                + "key doesn't match your Jira project key");
-        addTargetBtn.addClickListener(e -> openTargetFormDialog(null, null));
+        newItemBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY);
+        newItemBtn.setEnabled(false);
+        newItemBtn.addClickListener(e -> openItemFormDialog(null, null));
 
-        Button manageLinksBtn = new Button("Manage links", VaadinIcon.LIST.create());
-        manageLinksBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY);
-        manageLinksBtn.setTooltipText("Edit or remove manually tracked spaces/pages");
-        manageLinksBtn.addClickListener(e -> openManageLinksDialog());
+        Button newSpaceBtn = new Button("New space", VaadinIcon.FOLDER_ADD.create());
+        newSpaceBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY);
+        newSpaceBtn.addClickListener(e -> openSpaceFormDialog(null));
+
+        Button manageSpacesBtn = new Button("Manage spaces", VaadinIcon.COG.create());
+        manageSpacesBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY);
+        manageSpacesBtn.addClickListener(e -> openManageSpacesDialog());
 
         Span spacer = new Span();
         spacer.getStyle().set("flex", "1");
 
-        HorizontalLayout bar = new HorizontalLayout(title, countLabel, spacer, manageLinksBtn, addTargetBtn, refreshBtn);
+        HorizontalLayout bar = new HorizontalLayout(title, countLabel, spacer,
+                manageSpacesBtn, newSpaceBtn, newItemBtn, refreshBtn);
         bar.setWidthFull();
         bar.setAlignItems(FlexComponent.Alignment.CENTER);
         bar.getStyle()
@@ -227,9 +236,9 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
                 .set("padding", "10px 12px").set("background", "white")
                 .set("border-bottom", "1px solid #dfe1e6").set("box-sizing", "border-box")
                 .set("flex-wrap", "wrap").set("gap", "6px");
-        spacesListPanel.setVisible(false); // hidden until loadTree() finds at least one space
+        spacesListPanel.setVisible(false); // hidden until at least one space exists
 
-        filterField.setPlaceholder("Filter by title...");
+        filterField.setPlaceholder("Filter by name...");
         filterField.setClearButtonVisible(true);
         filterField.setPrefixComponent(VaadinIcon.SEARCH.create());
         filterField.setWidthFull();
@@ -262,27 +271,39 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
 
     private void buildTree() {
         tree.setSizeFull();
-        tree.addHierarchyColumn(ConfluenceFeature::getTitle).setHeader("Folder").setFlexGrow(3);
-        tree.addColumn(f -> f.getConfluenceUpdatedAt() != null ? DATE_FMT.format(f.getConfluenceUpdatedAt()) : "—")
+        tree.addHierarchyColumn(SpaceItem::getName).setHeader("Folder").setFlexGrow(3);
+        tree.addColumn(i -> i.getConfluenceUpdatedAt() != null ? DATE_FMT.format(i.getConfluenceUpdatedAt()) : "—")
                 .setHeader("Updated").setFlexGrow(0).setWidth("160px");
-        tree.addComponentColumn(this::statusBadge).setHeader("Status").setFlexGrow(0).setWidth("120px");
+        tree.addComponentColumn(this::statusBadge).setHeader("Status").setFlexGrow(0).setWidth("110px");
+        tree.addComponentColumn(this::buildItemActions).setHeader("").setFlexGrow(0).setWidth("140px");
 
-        // getItem() can be null if the tree's data provider was replaced (e.g. by a sync-triggered
-        // reload) between the click firing client-side and being processed here — ignore stale clicks
-        // rather than crash the whole view.
+        // getItem() can be null if the tree's data provider was replaced (e.g. by a create/edit/
+        // delete-triggered reload) between the click firing client-side and being processed here.
         tree.addItemClickListener(e -> {
             if (e.getItem() != null) showDetail(e.getItem());
         });
+
+        tree.setRowsDraggable(true);
+        tree.setDropMode(GridDropMode.ON_TOP_OR_BETWEEN);
+        tree.addDragStartListener(e ->
+                draggedItem = e.getDraggedItems().isEmpty() ? null : e.getDraggedItems().get(0));
+        tree.addDragEndListener(e -> draggedItem = null);
+        tree.addDropListener(this::handleDrop);
     }
 
-    private Span statusBadge(ConfluenceFeature feature) {
-        Span badge = new Span(isUnread(feature) ? "Updated" : "Read");
+    private Component statusBadge(SpaceItem item) {
+        if (!item.isLinked()) {
+            Span dash = new Span("—");
+            dash.getStyle().set("color", "#a5adba").set("font-size", "12px");
+            return dash;
+        }
+        Span badge = new Span(isUnread(item) ? "Updated" : "Read");
         badge.getStyle()
                 .set("padding", "2px 10px")
                 .set("border-radius", "12px")
                 .set("font-size", "12px")
                 .set("font-weight", "600");
-        if (isUnread(feature)) {
+        if (isUnread(item)) {
             badge.getStyle().set("background", "#fff8e6").set("color", "#974f00");
         } else {
             badge.getStyle().set("background", "#f4f5f7").set("color", "#6b778c");
@@ -290,9 +311,35 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         return badge;
     }
 
-    private boolean isUnread(ConfluenceFeature feature) {
-        int lastRead = readVersionByFeatureId.getOrDefault(feature.getId(), 0);
-        return feature.getVersion() > lastRead;
+    private Component buildItemActions(SpaceItem item) {
+        Button addBtn = new Button(VaadinIcon.PLUS.create());
+        addBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_SMALL);
+        addBtn.setTooltipText("Add sub-item");
+        addBtn.addClickListener(e -> openItemFormDialog(item, null));
+
+        Button editBtn = new Button(VaadinIcon.PENCIL.create());
+        editBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_SMALL);
+        editBtn.setTooltipText("Edit");
+        editBtn.addClickListener(e -> openItemFormDialog(null, item));
+
+        Button deleteBtn = new Button(VaadinIcon.MINUS.create());
+        deleteBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_ERROR, ButtonVariant.LUMO_SMALL);
+        deleteBtn.setTooltipText("Delete");
+        deleteBtn.addClickListener(e -> confirmDeleteItem(item));
+
+        HorizontalLayout actions = new HorizontalLayout(addBtn, editBtn, deleteBtn);
+        actions.setSpacing(false);
+        actions.setWidthFull();
+        actions.setJustifyContentMode(FlexComponent.JustifyContentMode.END);
+        actions.setBoxSizing(BoxSizing.BORDER_BOX);
+        actions.getStyle().set("gap", "2px");
+        return actions;
+    }
+
+    private boolean isUnread(SpaceItem item) {
+        if (!item.isLinked() || item.getVersion() == null) return false;
+        int lastRead = readVersionByItemId.getOrDefault(item.getId(), 0);
+        return item.getVersion() > lastRead;
     }
 
     // ── Manual sync trigger ("Refresh" — mirrors other views' re-fetch-from-source behavior) ─
@@ -308,7 +355,7 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
                 syncRunner.syncOne(cfg);
                 ui.access(() -> {
                     loadingBar.setVisible(false);
-                    loadTree();
+                    loadItemsAndRebuildTree();
                     Notification.show("Sync complete", 2000, Notification.Position.BOTTOM_END);
                 });
             } catch (Exception ex) {
@@ -323,99 +370,66 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         Thread.ofVirtual().start(task);
     }
 
-    // ── Manual space/page tracking (fallback when project-key auto-match fails) ─────────
+    // ── Space CRUD ───────────────────────────────────────────────────
 
-    /**
-     * Single-purpose form used for both adding a new manually-tracked link and correcting an
-     * existing one — {@code existing == null} means "add", otherwise "edit". Kept deliberately
-     * separate from the list/manage view (§ {@link #openManageLinksDialog()}) rather than
-     * combining "browse everything" and "add one thing" into a single dialog.
-     */
-    private void openTargetFormDialog(ManualSyncTarget existing, Runnable onSaved) {
+    private void openSpaceFormDialog(Space existing) {
         if (currentConfig == null || currentConfig.getBaseUrl() == null) return;
-        String baseUrl = currentConfig.getBaseUrl();
-        AppUser user = sessionUserService.getCurrentUser();
         boolean editing = existing != null;
 
-        Dialog dialog = new Dialog();
-        dialog.setHeaderTitle(editing ? "Edit tracked space/page" : "Add space/page");
-        dialog.setWidth("480px");
+        Dialog dialog = newDialog();
+        dialog.setHeaderTitle(editing ? "Edit space" : "New space");
+        dialog.setWidth("420px");
 
-        Span help = new Span("Paste a Confluence link — either a whole space "
-                + "(.../wiki/spaces/KEY) or one specific page (.../wiki/spaces/KEY/pages/123/Title). "
-                + "Folder links aren't supported yet (Confluence's Folder content type needs a newer "
-                + "API this app doesn't use) — pick a page inside the folder instead.");
-        help.getStyle().set("font-size", "12px").set("color", "#6b778c").set("display", "block")
-                .set("margin-bottom", "10px");
+        TextField nameField = new TextField("Name");
+        nameField.setWidthFull();
+        if (editing) nameField.setValue(existing.getName());
 
-        TextField urlField = new TextField("Confluence link");
-        urlField.setWidthFull();
-        urlField.setPlaceholder("https://yoursite.atlassian.net/wiki/spaces/DOCS/pages/12345/Title");
-        if (editing && existing.getSourceUrl() != null) urlField.setValue(existing.getSourceUrl());
+        TextField linkField = new TextField("Jira link (optional)");
+        linkField.setWidthFull();
+        linkField.setPlaceholder("https://yoursite.atlassian.net/browse/DEMO");
+        linkField.setHelperText("Informational only — shown on the space, drives no automation.");
+        if (editing && existing.getJiraLink() != null) linkField.setValue(existing.getJiraLink());
 
         Button cancelBtn = new Button("Cancel", e -> dialog.close());
-        Button saveBtn = new Button(editing ? "Save" : "Add", e -> {
-            ParsedLink link = ConfluenceLinkParser.parse(urlField.getValue());
-            switch (link.kind()) {
-                case INVALID -> Notification.show(
-                        "Not a recognized Confluence link — paste the full URL from your browser's address bar.",
-                        4000, Notification.Position.MIDDLE);
-                case UNSUPPORTED_FOLDER -> {
-                    Notification n = Notification.show(
-                            "Folder links aren't supported yet — Confluence's Folder type needs a newer API "
-                                    + "this app doesn't use. Use a Space link or a specific Page link inside the folder instead.",
-                            5000, Notification.Position.MIDDLE);
-                    n.addThemeVariants(NotificationVariant.LUMO_ERROR);
-                }
-                case SPACE, PAGE -> {
-                    String pageId = link.kind() == Kind.PAGE ? link.pageId() : null;
-                    boolean duplicate = manualSyncTargetRepo.findByBaseUrl(baseUrl).stream()
-                            .anyMatch(t -> (!editing || !t.getId().equals(existing.getId()))
-                                    && Objects.equals(t.getSpaceKey(), link.spaceKey())
-                                    && Objects.equals(t.getPageId(), pageId));
-                    if (duplicate) {
-                        Notification.show("Another entry already tracks that space/page",
-                                3000, Notification.Position.MIDDLE);
-                        return;
-                    }
-                    ManualSyncTarget target = editing ? existing : new ManualSyncTarget();
-                    target.setBaseUrl(baseUrl);
-                    target.setSpaceKey(link.spaceKey());
-                    target.setPageId(pageId);
-                    target.setSourceUrl(urlField.getValue());
-                    if (!editing) {
-                        target.setAddedByUser(user);
-                        target.setAddedAt(Instant.now());
-                    }
-                    manualSyncTargetRepo.save(target);
-                    dialog.close();
-                    if (onSaved != null) onSaved.run();
-                    syncAndReload();
-                    Notification.show(editing ? "Updated" : "Added", 2000, Notification.Position.BOTTOM_END);
-                }
+        Button saveBtn = new Button(editing ? "Save" : "Create", e -> {
+            String name = nameField.getValue() == null ? "" : nameField.getValue().trim();
+            if (name.isEmpty()) {
+                Notification.show("Name is required", 2500, Notification.Position.MIDDLE);
+                return;
             }
+            Space space = editing ? existing : new Space();
+            space.setBaseUrl(currentConfig.getBaseUrl());
+            space.setName(name);
+            space.setJiraLink(blankToNull(linkField.getValue()));
+            if (!editing) {
+                space.setCreatedByUser(sessionUserService.getCurrentUser());
+                space.setCreatedAt(Instant.now());
+            }
+            spaceRepo.save(space);
+            dialog.close();
+            selectedSpace = space;
+            loadSpaces();
+            Notification.show(editing ? "Updated" : "Created", 2000, Notification.Position.BOTTOM_END);
         });
         saveBtn.addThemeVariants(ButtonVariant.LUMO_PRIMARY);
 
-        dialog.add(help, urlField);
+        dialog.add(nameField, linkField);
         dialog.getFooter().add(saveBtn, cancelBtn);
         dialog.open();
     }
 
-    /** Lists every manually-tracked space/page for this site, with per-row Edit/Remove actions. */
-    private void openManageLinksDialog() {
+    private void openManageSpacesDialog() {
         if (currentConfig == null || currentConfig.getBaseUrl() == null) return;
-        String baseUrl = currentConfig.getBaseUrl();
 
-        Dialog dialog = new Dialog();
-        dialog.setHeaderTitle("Manually tracked spaces/pages");
+        Dialog dialog = newDialog();
+        dialog.setHeaderTitle("Manage spaces");
         dialog.setWidth("480px");
 
         VerticalLayout list = new VerticalLayout();
         list.setPadding(false);
         list.setSpacing(false);
         list.getStyle().set("gap", "6px");
-        renderTargetList(list, baseUrl);
+        renderSpaceRows(list);
 
         Button closeBtn = new Button("Close", e -> dialog.close());
         dialog.add(list);
@@ -423,40 +437,30 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         dialog.open();
     }
 
-    private void renderTargetList(VerticalLayout list, String baseUrl) {
+    private void renderSpaceRows(VerticalLayout list) {
         list.removeAll();
-        List<ManualSyncTarget> targets = manualSyncTargetRepo.findByBaseUrl(baseUrl);
-        if (targets.isEmpty()) {
-            Span none = new Span("No manually tracked spaces/pages yet.");
+        if (allSpaces.isEmpty()) {
+            Span none = new Span("No spaces yet.");
             none.getStyle().set("color", "#6b778c").set("font-size", "12px").set("font-style", "italic");
             list.add(none);
             return;
         }
-        for (ManualSyncTarget target : targets) {
-            list.add(buildTargetRow(list, baseUrl, target));
+        for (Space space : allSpaces) {
+            list.add(buildSpaceRow(list, space));
         }
     }
 
-    private HorizontalLayout buildTargetRow(VerticalLayout list, String baseUrl, ManualSyncTarget target) {
-        String label = target.getPageId() == null
-                ? "Space " + target.getSpaceKey()
-                : "Page " + target.getPageId() + " (space " + target.getSpaceKey() + ")";
-        Span text = new Span(label);
+    private HorizontalLayout buildSpaceRow(VerticalLayout list, Space space) {
+        Span text = new Span(space.getName());
         text.getStyle().set("font-size", "13px").set("color", "#172b4d").set("flex", "1");
 
         Button editBtn = new Button(VaadinIcon.PENCIL.create());
         editBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_SMALL);
-        editBtn.setTooltipText("Edit this link, e.g. if it was mistyped");
-        editBtn.addClickListener(e -> openTargetFormDialog(target, () -> renderTargetList(list, baseUrl)));
+        editBtn.addClickListener(e -> openSpaceFormDialog(space));
 
         Button removeBtn = new Button(VaadinIcon.TRASH.create());
         removeBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_ERROR, ButtonVariant.LUMO_SMALL);
-        removeBtn.addClickListener(e -> {
-            manualSyncTargetRepo.delete(target);
-            renderTargetList(list, baseUrl);
-            Notification.show("Removed from tracking (already-synced data stays until next sync)",
-                    3000, Notification.Position.BOTTOM_END);
-        });
+        removeBtn.addClickListener(e -> confirmDeleteSpace(space, () -> renderSpaceRows(list)));
 
         HorizontalLayout row = new HorizontalLayout(text, editBtn, removeBtn);
         row.setWidthFull();
@@ -467,72 +471,364 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         return row;
     }
 
-    // ── Data loading (local DB reads — fast, no async needed) ──────────
-
-    /** Returns the number of features loaded, so callers can decide whether to trigger a sync. */
-    private int loadTree() {
-        AppUser user = sessionUserService.getCurrentUser();
-        if (currentConfig == null || currentConfig.getBaseUrl() == null) {
-            countLabel.setText("0 features");
-            allFeatures = List.of();
-            allSpaceKeys = List.of();
-            selectedSpaceKey = null;
-            renderSpacesList();
-            applyTreeFilter(filterField.getValue());
-            return 0;
-        }
-        String baseUrl = currentConfig.getBaseUrl();
-
-        allFeatures = featureRepo.findByBaseUrl(baseUrl);
-        readVersionByFeatureId = new HashMap<>();
-        for (FeatureReadStatus rs : readStatusRepo.findByUser(user)) {
-            readVersionByFeatureId.put(rs.getFeature().getId(), rs.getLastReadVersion());
-        }
-
-        allSpaceKeys = allFeatures.stream()
-                .map(ConfluenceFeature::getSpaceKey)
-                .filter(Objects::nonNull)
-                .distinct()
-                .sorted()
-                .toList();
-        if (selectedSpaceKey == null || !allSpaceKeys.contains(selectedSpaceKey)) {
-            // Default to the first space — keeps the tree scoped to one space at a time instead
-            // of mixing pages from every matched project together, which is hard to make sense of
-            // once more than one space is being tracked.
-            selectedSpaceKey = allSpaceKeys.isEmpty() ? null : allSpaceKeys.get(0);
-        }
-        renderSpacesList();
-        applyTreeFilter(filterField.getValue());
-
-        if (allFeatures.isEmpty()) {
-            // A space is only synced when its Confluence space KEY exactly matches a Jira
-            // project key you have tickets assigned in — this is a common, valid outcome
-            // (no error), not a failure, so spell out the two likely reasons here.
-            countLabel.setText("0 features — no Confluence space's key matches a Jira project "
-                    + "you have tickets assigned in. Check that the space key (e.g. \"DOCS\") "
-                    + "matches your Jira project key exactly, and that you have at least one "
-                    + "ticket assigned to you in that project.");
-        } else {
-            countLabel.setText(allFeatures.size() + " feature" + (allFeatures.size() == 1 ? "" : "s")
-                    + " (synced from Confluence)");
-        }
-        showPlaceholder();
-        return allFeatures.size();
+    private void confirmDeleteSpace(Space space, Runnable onDone) {
+        int itemCount = spaceItemRepo.findBySpace(space).size();
+        ConfirmDialog confirm = new ConfirmDialog();
+        confirm.setHeader("Delete space");
+        confirm.setText("Delete \"" + space.getName() + "\""
+                + (itemCount > 0 ? " and all " + itemCount + " item(s) in it" : "")
+                + "? This also removes their Ticket Docs and Design Docs. This action cannot be undone.");
+        confirm.setCancelable(true);
+        confirm.setCancelText("Cancel");
+        confirm.setConfirmText("Delete");
+        confirm.setConfirmButtonTheme("error primary");
+        confirm.addConfirmListener(e -> {
+            for (SpaceItem root : spaceItemRepo.findBySpace_IdAndParentIsNull(space.getId())) {
+                deleteItemCascade(root);
+            }
+            spaceRepo.delete(space);
+            if (selectedSpace != null && selectedSpace.getId().equals(space.getId())) {
+                selectedSpace = null;
+            }
+            onDone.run();
+            loadSpaces();
+            Notification.show("Deleted", 2000, Notification.Position.BOTTOM_END);
+        });
+        confirm.open();
     }
 
-    /** Chip row letting the user pick which tracked Space the tree/filter below should scope to. */
+    private String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s.trim();
+    }
+
+    /** All Spaces dialogs are explicit-close-only — outside click / Esc must not discard an in-progress form. */
+    private Dialog newDialog() {
+        Dialog dialog = new Dialog();
+        dialog.setCloseOnOutsideClick(false);
+        dialog.setCloseOnEsc(false);
+        return dialog;
+    }
+
+    // ── Item CRUD ────────────────────────────────────────────────────
+
+    /** {@code parent == null} means "root item"; {@code existing == null} means "create". */
+    private void openItemFormDialog(SpaceItem parent, SpaceItem existing) {
+        boolean editing = existing != null;
+        Space space = editing ? existing.getSpace() : selectedSpace;
+        if (space == null) return;
+
+        Dialog dialog = newDialog();
+        dialog.setHeaderTitle(editing ? "Edit item" : (parent != null ? "New sub-item" : "New item"));
+        dialog.setWidth("480px");
+
+        Span help = new Span("Link one specific Confluence page to auto-track its version and "
+                + "update status here. Leave blank for a plain organizational item.");
+        help.getStyle().set("font-size", "12px").set("color", "#6b778c").set("display", "block")
+                .set("margin-bottom", "10px");
+
+        TextField nameField = new TextField("Name");
+        nameField.setWidthFull();
+        if (editing) nameField.setValue(existing.getName());
+
+        TextField linkField = new TextField("Confluence page link (optional)");
+        linkField.setWidthFull();
+        linkField.setPlaceholder("https://yoursite.atlassian.net/wiki/spaces/DOCS/pages/12345/Title");
+        if (editing && existing.getUrl() != null) linkField.setValue(existing.getUrl());
+
+        Button cancelBtn = new Button("Cancel", e -> dialog.close());
+        Button saveBtn = new Button(editing ? "Save" : "Create", e -> {
+            String name = nameField.getValue() == null ? "" : nameField.getValue().trim();
+            if (name.isEmpty()) {
+                Notification.show("Name is required", 2500, Notification.Position.MIDDLE);
+                return;
+            }
+            String rawLink = linkField.getValue() == null ? "" : linkField.getValue().trim();
+            ParsedLink link = null;
+            if (!rawLink.isEmpty()) {
+                link = ConfluenceLinkParser.parse(rawLink);
+                if (link.kind() != Kind.PAGE) {
+                    String message = switch (link.kind()) {
+                        case UNSUPPORTED_FOLDER -> "That's a link to a Confluence \"Folder\", not a page — "
+                                + "folders only group pages and aren't modeled by the Confluence API this app "
+                                + "uses. Open the folder in Confluence, click the specific page you want to "
+                                + "track, and paste that page's link instead.";
+                        case SPACE -> "That's a link to a whole Confluence space, not one page — "
+                                + "an item links to exactly one specific page. Open the page you want to "
+                                + "track inside that space and paste its link instead.";
+                        default -> "Not a recognized Confluence page link — paste the full URL from your "
+                                + "browser's address bar (.../wiki/spaces/KEY/pages/12345/Title).";
+                    };
+                    Notification n = Notification.show(message, 6000, Notification.Position.MIDDLE);
+                    n.addThemeVariants(NotificationVariant.LUMO_ERROR);
+                    return;
+                }
+            }
+
+            String previousPageId = editing ? existing.getConfluencePageId() : null;
+            boolean linkChanged = !Objects.equals(previousPageId, link != null ? link.pageId() : null);
+
+            SpaceItem item = editing ? existing : new SpaceItem();
+            item.setName(name);
+            if (!editing) {
+                item.setSpace(space);
+                item.setParent(parent);
+                item.setSortOrder(nextSortOrder(space, parent));
+                item.setCreatedByUser(sessionUserService.getCurrentUser());
+                item.setCreatedAt(Instant.now());
+            }
+            if (link != null) {
+                item.setConfluenceSpaceKey(link.spaceKey());
+                item.setConfluencePageId(link.pageId());
+            } else {
+                item.setConfluenceSpaceKey(null);
+                item.setConfluencePageId(null);
+                item.setUrl(null);
+                item.setVersion(null);
+                item.setConfluenceUpdatedAt(null);
+                item.setLastSyncedAt(null);
+            }
+            spaceItemRepo.save(item);
+            dialog.close();
+            loadItemsAndRebuildTree();
+            Notification.show(editing ? "Updated" : "Created", 2000, Notification.Position.BOTTOM_END);
+
+            if (link != null && linkChanged) {
+                refreshLinkedItemOnce(item);
+            }
+        });
+        saveBtn.addThemeVariants(ButtonVariant.LUMO_PRIMARY);
+
+        dialog.add(help, nameField, linkField);
+        dialog.getFooter().add(saveBtn, cancelBtn);
+        dialog.open();
+    }
+
+    private int nextSortOrder(Space space, SpaceItem parent) {
+        List<SpaceItem> siblings = parent != null
+                ? spaceItemRepo.findByParent_Id(parent.getId())
+                : spaceItemRepo.findBySpace_IdAndParentIsNull(space.getId());
+        return siblings.stream().mapToInt(SpaceItem::getSortOrder).max().orElse(-1) + 1;
+    }
+
+    /** Fetches the newly-linked page once, in the background, so the badge doesn't wait for the next scheduled sync. */
+    private void refreshLinkedItemOnce(SpaceItem item) {
+        if (currentConfig == null) return;
+        UI ui = UI.getCurrent();
+        JiraConfig cfg = currentConfig;
+        Long itemId = item.getId();
+        String pageId = item.getConfluencePageId();
+
+        Runnable task = DelegatingSecurityContextRunnable.create(() -> {
+            ConfluencePageDetail detail;
+            try {
+                detail = jiraService.getConfluencePageDetail(cfg, pageId);
+            } catch (Exception ex) {
+                detail = null;
+            }
+            ConfluencePageDetail finalDetail = detail;
+            ui.access(() -> {
+                if (finalDetail == null) return;
+                spaceItemRepo.findById(itemId).ifPresent(fresh -> {
+                    fresh.setVersion(finalDetail.version());
+                    fresh.setConfluenceUpdatedAt(finalDetail.updatedAt());
+                    fresh.setLastSyncedAt(Instant.now());
+                    fresh.setUrl(cfg.getBaseUrl() + "/wiki/spaces/" + fresh.getConfluenceSpaceKey()
+                            + "/pages/" + fresh.getConfluencePageId());
+                    spaceItemRepo.save(fresh);
+                    loadItemsAndRebuildTree();
+                    if (selectedItem != null && selectedItem.getId().equals(itemId)) {
+                        showDetail(fresh);
+                    }
+                });
+            });
+        }, SecurityContextHolder.getContext());
+        Thread.ofVirtual().start(task);
+    }
+
+    private void confirmDeleteItem(SpaceItem item) {
+        int descendants = countDescendants(item);
+        ConfirmDialog confirm = new ConfirmDialog();
+        confirm.setHeader("Delete item");
+        confirm.setText("Delete \"" + item.getName() + "\""
+                + (descendants > 0 ? " and its " + descendants + " sub-item(s)" : "")
+                + "? This also removes their Ticket Docs and Design Docs. This action cannot be undone.");
+        confirm.setCancelable(true);
+        confirm.setCancelText("Cancel");
+        confirm.setConfirmText("Delete");
+        confirm.setConfirmButtonTheme("error primary");
+        confirm.addConfirmListener(e -> {
+            boolean wasSelected = selectedItem != null && selectedItem.getId().equals(item.getId());
+            deleteItemCascade(item);
+            if (wasSelected) showPlaceholder();
+            loadItemsAndRebuildTree();
+            Notification.show("Deleted", 2000, Notification.Position.BOTTOM_END);
+        });
+        confirm.open();
+    }
+
+    private int countDescendants(SpaceItem item) {
+        int count = 0;
+        for (SpaceItem child : spaceItemRepo.findByParent_Id(item.getId())) {
+            count += 1 + countDescendants(child);
+        }
+        return count;
+    }
+
+    /** Deletes an item's entire subtree bottom-up (children before parents, for FK safety), along with each item's Ticket Doc and Design Doc rows/files. */
+    private void deleteItemCascade(SpaceItem item) {
+        for (SpaceItem child : spaceItemRepo.findByParent_Id(item.getId())) {
+            deleteItemCascade(child);
+        }
+        historyRepo.findByItemOrderByDetectedAtDesc(item).forEach(historyRepo::delete);
+        readStatusRepo.findByItem(item).forEach(readStatusRepo::delete);
+        ticketDocRepo.findByFeature(item).ifPresent(doc -> {
+            ticketDocItemRepo.findByTicketDoc(doc).forEach(ticketDocItemRepo::delete);
+            ticketDocRepo.delete(doc);
+        });
+        designDocRepo.findByFeatureOrderByVersionDesc(item).forEach(designDocRepo::delete);
+        deleteDirectoryQuietly(Path.of("data", "feature-tickets", String.valueOf(item.getId())));
+        deleteDirectoryQuietly(Path.of("data", "feature-design-docs", String.valueOf(item.getId())));
+        spaceItemRepo.delete(item);
+    }
+
+    private void deleteDirectoryQuietly(Path dir) {
+        if (!Files.exists(dir)) return;
+        try (var stream = Files.walk(dir)) {
+            stream.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.delete(p);
+                } catch (IOException ignored) {
+                    // best-effort cleanup — a leftover file on disk isn't worth failing the delete
+                }
+            });
+        } catch (IOException ignored) {
+            // best-effort cleanup
+        }
+    }
+
+    // ── Drag & drop reordering/reparenting ──────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private void handleDrop(GridDropEvent<SpaceItem> event) {
+        SpaceItem dragged = draggedItem;
+        draggedItem = null;
+        if (dragged == null) return;
+
+        SpaceItem target = event.getDropTargetItem().orElse(null);
+        if (target == null) return;
+
+        TreeDataProvider<SpaceItem> provider = (TreeDataProvider<SpaceItem>) tree.getDataProvider();
+        TreeData<SpaceItem> treeData = provider.getTreeData();
+
+        if (isSelfOrDescendant(treeData, dragged, target)) {
+            Notification.show("Can't move an item into itself", 2500, Notification.Position.MIDDLE);
+            return;
+        }
+
+        SpaceItem oldParent = treeData.getParent(dragged);
+        GridDropLocation location = event.getDropLocation();
+        SpaceItem newParent = location == GridDropLocation.ON_TOP ? target : treeData.getParent(target);
+
+        treeData.setParent(dragged, newParent);
+        if (location == GridDropLocation.ABOVE) {
+            treeData.moveAfterSibling(dragged, siblingBefore(treeData, newParent, target));
+        } else if (location == GridDropLocation.BELOW) {
+            treeData.moveAfterSibling(dragged, target);
+        }
+        // ON_TOP: setParent already appended dragged as the last child of target.
+
+        provider.refreshAll();
+
+        dragged.setParent(newParent);
+        List<SpaceItem> toSave = new ArrayList<>(renumbered(treeData.getChildren(newParent)));
+        if (!Objects.equals(idOf(oldParent), idOf(newParent))) {
+            toSave.addAll(renumbered(treeData.getChildren(oldParent)));
+        }
+        spaceItemRepo.saveAll(toSave);
+    }
+
+    /** True if {@code candidate} is {@code subject} itself or lies within its subtree — dropping there would create a cycle. */
+    private boolean isSelfOrDescendant(TreeData<SpaceItem> treeData, SpaceItem subject, SpaceItem candidate) {
+        SpaceItem p = candidate;
+        while (p != null) {
+            if (p.getId().equals(subject.getId())) return true;
+            p = treeData.getParent(p);
+        }
+        return false;
+    }
+
+    private SpaceItem siblingBefore(TreeData<SpaceItem> treeData, SpaceItem parent, SpaceItem target) {
+        List<SpaceItem> children = treeData.getChildren(parent);
+        int idx = children.indexOf(target);
+        return idx > 0 ? children.get(idx - 1) : null;
+    }
+
+    private List<SpaceItem> renumbered(List<SpaceItem> children) {
+        for (int i = 0; i < children.size(); i++) children.get(i).setSortOrder(i);
+        return children;
+    }
+
+    private Long idOf(SpaceItem item) {
+        return item != null ? item.getId() : null;
+    }
+
+    // ── Data loading (local DB reads — fast, no async needed) ──────────
+
+    private void loadSpaces() {
+        if (currentConfig == null || currentConfig.getBaseUrl() == null) {
+            allSpaces = List.of();
+            selectedSpace = null;
+            renderSpacesList();
+            loadItemsAndRebuildTree();
+            return;
+        }
+        allSpaces = spaceRepo.findByBaseUrlOrderByNameAsc(currentConfig.getBaseUrl());
+        Space stillValid = selectedSpace == null ? null : allSpaces.stream()
+                .filter(s -> s.getId().equals(selectedSpace.getId())).findFirst().orElse(null);
+        selectedSpace = stillValid != null ? stillValid : (allSpaces.isEmpty() ? null : allSpaces.get(0));
+
+        renderSpacesList();
+        loadItemsAndRebuildTree();
+    }
+
+    private void loadItemsAndRebuildTree() {
+        AppUser user = sessionUserService.getCurrentUser();
+        allItems = selectedSpace != null ? spaceItemRepo.findBySpace(selectedSpace) : List.of();
+
+        readVersionByItemId = new HashMap<>();
+        if (user != null) {
+            for (SpaceItemReadStatus rs : readStatusRepo.findByUser(user)) {
+                readVersionByItemId.put(rs.getItem().getId(), rs.getLastReadVersion());
+            }
+        }
+
+        newItemBtn.setEnabled(selectedSpace != null);
+        if (allSpaces.isEmpty()) {
+            countLabel.setText("No spaces yet — click \"New space\" to create one");
+        } else if (selectedSpace == null) {
+            countLabel.setText("");
+        } else if (allItems.isEmpty()) {
+            countLabel.setText("No items yet — click \"New item\" to add one");
+        } else {
+            countLabel.setText(allItems.size() + " item" + (allItems.size() == 1 ? "" : "s"));
+        }
+
+        applyTreeFilter(filterField.getValue());
+        showPlaceholder();
+    }
+
+    /** Chip row letting the user pick which Space the tree/filter below should scope to. */
     private void renderSpacesList() {
         spacesListPanel.removeAll();
-        if (allSpaceKeys.isEmpty()) {
+        if (allSpaces.isEmpty()) {
             spacesListPanel.setVisible(false);
             return;
         }
         spacesListPanel.setVisible(true);
-        for (String spaceKey : allSpaceKeys) {
-            long count = allFeatures.stream().filter(f -> spaceKey.equals(f.getSpaceKey())).count();
-            boolean selected = spaceKey.equals(selectedSpaceKey);
+        for (Space space : allSpaces) {
+            boolean selected = selectedSpace != null && space.getId().equals(selectedSpace.getId());
 
-            Span chip = new Span(spaceKey + " (" + count + ")");
+            Span chip = new Span(space.getName());
             chip.getStyle()
                     .set("padding", "4px 12px")
                     .set("border-radius", "14px")
@@ -542,64 +838,65 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
                     .set("white-space", "nowrap")
                     .set("background", selected ? "#0052cc" : "#f4f5f7")
                     .set("color", selected ? "white" : "#42526e");
-            chip.addClickListener(e -> selectSpace(spaceKey));
+            chip.addClickListener(e -> selectSpace(space));
             spacesListPanel.add(chip);
         }
     }
 
-    private void selectSpace(String spaceKey) {
-        if (Objects.equals(selectedSpaceKey, spaceKey)) return;
-        selectedSpaceKey = spaceKey;
+    private void selectSpace(Space space) {
+        if (selectedSpace != null && selectedSpace.getId().equals(space.getId())) return;
+        selectedSpace = space;
         renderSpacesList();
-        applyTreeFilter(filterField.getValue());
-        showPlaceholder();
+        loadItemsAndRebuildTree();
     }
 
     /**
-     * Applies the selected Space (§ chip row) and the "Filter by title" text to the tree. Blank
-     * title query shows the full hierarchy for that space; non-blank switches to a flat list of
-     * matches — a real hierarchical filter would hide a matching page whose ancestor title
-     * doesn't also match (the tree can only reach a node by first expanding its parent), so
-     * flattening is what actually lets you find a page buried several levels deep.
+     * Applies the "Filter by name" text to the selected space's items. Blank shows the full
+     * hierarchy; non-blank switches to a flat list of matches — a real hierarchical filter would
+     * hide a matching item whose ancestor's name doesn't also match (the tree can only reach a
+     * node by first expanding its parent), so flattening is what actually lets you find an item
+     * buried several levels deep. Drag & drop is disabled while filtering, since the flattened
+     * view doesn't reflect the real parent/child structure.
      */
     private void applyTreeFilter(String query) {
-        List<ConfluenceFeature> scoped = selectedSpaceKey == null
-                ? allFeatures
-                : allFeatures.stream().filter(f -> selectedSpaceKey.equals(f.getSpaceKey())).toList();
-
         String q = query == null ? "" : query.trim().toLowerCase();
-        if (q.isEmpty()) {
-            tree.setDataProvider(new TreeDataProvider<>(buildTreeData(scoped)));
-            tree.expandRecursively(scoped, 1);
+        boolean filtering = !q.isEmpty();
+        tree.setRowsDraggable(!filtering);
+
+        if (!filtering) {
+            tree.setDataProvider(new TreeDataProvider<>(buildTreeData(allItems)));
+            tree.expandRecursively(allItems, 1);
             return;
         }
-        List<ConfluenceFeature> matches = scoped.stream()
-                .filter(f -> f.getTitle() != null && f.getTitle().toLowerCase().contains(q))
+        List<SpaceItem> matches = allItems.stream()
+                .filter(i -> i.getName() != null && i.getName().toLowerCase().contains(q))
                 .toList();
-        TreeData<ConfluenceFeature> flat = new TreeData<>();
-        for (ConfluenceFeature f : matches) flat.addItem(null, f);
+        TreeData<SpaceItem> flat = new TreeData<>();
+        for (SpaceItem i : matches) flat.addItem(null, i);
         tree.setDataProvider(new TreeDataProvider<>(flat));
     }
 
-    /** Builds a TreeData from a flat list using parentPageId, tolerating unknown/missing parents. */
-    private TreeData<ConfluenceFeature> buildTreeData(List<ConfluenceFeature> all) {
-        TreeData<ConfluenceFeature> treeData = new TreeData<>();
-        Map<String, ConfluenceFeature> byPageId = new HashMap<>();
-        for (ConfluenceFeature f : all) byPageId.put(f.getPageId(), f);
+    /** Builds a TreeData from a flat list using each item's {@code parent}, sorted by {@code sortOrder}. */
+    private TreeData<SpaceItem> buildTreeData(List<SpaceItem> all) {
+        TreeData<SpaceItem> treeData = new TreeData<>();
+        Map<Long, SpaceItem> byId = all.stream().collect(Collectors.toMap(SpaceItem::getId, i -> i));
 
-        Set<String> added = new HashSet<>();
-        List<ConfluenceFeature> remaining = new ArrayList<>(all);
+        List<SpaceItem> remaining = new ArrayList<>(all);
+        remaining.sort(Comparator.comparingInt(SpaceItem::getSortOrder));
+
+        Set<Long> added = new HashSet<>();
         boolean progress = true;
         while (!remaining.isEmpty() && progress) {
             progress = false;
-            Iterator<ConfluenceFeature> it = remaining.iterator();
+            Iterator<SpaceItem> it = remaining.iterator();
             while (it.hasNext()) {
-                ConfluenceFeature f = it.next();
-                ConfluenceFeature parent = f.getParentPageId() != null ? byPageId.get(f.getParentPageId()) : null;
-                boolean parentReady = parent == null || added.contains(parent.getPageId());
+                SpaceItem item = it.next();
+                Long parentId = item.getParent() != null ? item.getParent().getId() : null;
+                SpaceItem parent = parentId != null ? byId.get(parentId) : null;
+                boolean parentReady = parent == null || added.contains(parent.getId());
                 if (parentReady) {
-                    treeData.addItem(parent, f);
-                    added.add(f.getPageId());
+                    treeData.addItem(parent, item);
+                    added.add(item.getId());
                     it.remove();
                     progress = true;
                 }
@@ -607,14 +904,14 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         }
         // Leftovers (e.g. a parent-of-a-parent cycle, which shouldn't happen in practice) —
         // surface them as roots rather than silently dropping data.
-        for (ConfluenceFeature f : remaining) treeData.addItem(null, f);
+        for (SpaceItem leftover : remaining) treeData.addItem(null, leftover);
         return treeData;
     }
 
-    // ── Detail panel: top (feature info) + bottom (ticket docs) ────────
+    // ── Detail panel: top (item info) + bottom (ticket docs) ────────
 
     private void showPlaceholder() {
-        selectedFeature = null;
+        selectedItem = null;
         selectedDoc = null;
         detailPanel.removeAll();
         detailPanel.setPadding(true);
@@ -622,21 +919,21 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         detailPanel.setJustifyContentMode(FlexComponent.JustifyContentMode.CENTER);
         Span icon = new Span("🗂");
         icon.getStyle().set("font-size", "40px").set("margin-bottom", "12px");
-        Span msg = new Span("Select a page to view its details and ticket docs");
+        Span msg = new Span("Select an item to view its details and ticket docs");
         msg.getStyle().set("color", "#6b778c").set("font-size", "14px").set("font-style", "italic");
         detailPanel.add(icon, msg);
     }
 
-    private void showDetail(ConfluenceFeature feature) {
-        selectedFeature = feature;
-        selectedDoc = ticketDocRepo.findByFeature(feature).orElse(null);
+    private void showDetail(SpaceItem item) {
+        selectedItem = item;
+        selectedDoc = ticketDocRepo.findByFeature(item).orElse(null);
 
         detailPanel.removeAll();
         detailPanel.setPadding(false);
         detailPanel.setAlignItems(Alignment.STRETCH);
         detailPanel.setJustifyContentMode(FlexComponent.JustifyContentMode.START);
 
-        renderFeatureInfo(feature);
+        renderItemInfo(item);
         renderTicketDocsPanel();
 
         SplitLayout innerSplit = new SplitLayout(topDetailPanel, ticketDocsPanel);
@@ -648,68 +945,85 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         detailPanel.setFlexGrow(1, innerSplit);
     }
 
-    private void renderFeatureInfo(ConfluenceFeature feature) {
+    private void renderItemInfo(SpaceItem item) {
         topDetailPanel.removeAll();
         topDetailPanel.setPadding(true);
         topDetailPanel.setSpacing(false);
         topDetailPanel.getStyle().set("overflow-y", "auto");
 
-        Anchor titleLink = new Anchor(feature.getUrl(), feature.getTitle());
-        titleLink.setTarget("_blank");
-        titleLink.getStyle()
-                .set("font-weight", "700").set("font-size", "15px")
-                .set("color", "#0052cc").set("text-decoration", "none");
+        Component titleComp;
+        if (item.getUrl() != null) {
+            Anchor titleLink = new Anchor(item.getUrl(), item.getName());
+            titleLink.setTarget("_blank");
+            titleLink.getStyle()
+                    .set("font-weight", "700").set("font-size", "15px")
+                    .set("color", "#0052cc").set("text-decoration", "none");
+            titleComp = titleLink;
+        } else {
+            Span titleSpan = new Span(item.getName());
+            titleSpan.getStyle().set("font-weight", "700").set("font-size", "15px").set("color", "#172b4d");
+            titleComp = titleSpan;
+        }
 
-        Span meta = new Span("Space " + feature.getSpaceKey() + " · v" + feature.getVersion());
+        // item.getSpace() is a lazy JPA relation and this runs outside an open Hibernate session
+        // (Vaadin's own servlet, not routed through Spring MVC's OpenEntityManagerInViewInterceptor) —
+        // use the already-loaded selectedSpace (every item in the tree belongs to it) instead of
+        // triggering a lazy load, which would throw LazyInitializationException.
+        Span meta = new Span((selectedSpace != null ? selectedSpace.getName() : "")
+                + (item.isLinked() ? " · v" + item.getVersion() : " · not linked to Confluence"));
         meta.getStyle().set("color", "#6b778c").set("font-size", "12px").set("display", "block")
                 .set("margin", "4px 0 16px 0");
 
-        Hr divider = new Hr();
-        divider.getStyle().set("margin", "0 0 16px 0").set("border-color", "#dfe1e6");
+        topDetailPanel.add(titleComp, meta);
 
-        H5 historyTitle = new H5("Update History");
-        historyTitle.getStyle().set("margin", "0 0 8px 0").set("color", "#172b4d").set("font-size", "13px");
+        if (item.isLinked()) {
+            Hr divider = new Hr();
+            divider.getStyle().set("margin", "0 0 16px 0").set("border-color", "#dfe1e6");
 
-        VerticalLayout historyList = new VerticalLayout();
-        historyList.setPadding(false);
-        historyList.setSpacing(false);
-        historyList.getStyle().set("gap", "6px");
+            H5 historyTitle = new H5("Update History");
+            historyTitle.getStyle().set("margin", "0 0 8px 0").set("color", "#172b4d").set("font-size", "13px");
 
-        List<ConfluenceFeatureUpdateHistory> history = historyRepo.findByFeatureOrderByDetectedAtDesc(feature);
-        if (history.isEmpty()) {
-            Span none = new Span("No updates detected since this page was first synced.");
-            none.getStyle().set("color", "#6b778c").set("font-size", "12px").set("font-style", "italic");
-            historyList.add(none);
-        } else {
-            for (ConfluenceFeatureUpdateHistory h : history) {
-                Span line = new Span("v" + h.getOldVersion() + " → v" + h.getNewVersion()
-                        + "  ·  updated " + DATE_FMT.format(h.getNewUpdatedAt())
-                        + "  ·  detected " + DATE_FMT.format(h.getDetectedAt()));
-                line.getStyle().set("font-size", "12px").set("color", "#172b4d")
-                        .set("padding", "6px 8px").set("background", "#f4f5f7").set("border-radius", "4px");
-                historyList.add(line);
+            VerticalLayout historyList = new VerticalLayout();
+            historyList.setPadding(false);
+            historyList.setSpacing(false);
+            historyList.getStyle().set("gap", "6px");
+
+            List<SpaceItemUpdateHistory> history = historyRepo.findByItemOrderByDetectedAtDesc(item);
+            if (history.isEmpty()) {
+                Span none = new Span("No updates detected since this page was linked.");
+                none.getStyle().set("color", "#6b778c").set("font-size", "12px").set("font-style", "italic");
+                historyList.add(none);
+            } else {
+                for (SpaceItemUpdateHistory h : history) {
+                    Span line = new Span("v" + h.getOldVersion() + " → v" + h.getNewVersion()
+                            + "  ·  updated " + DATE_FMT.format(h.getNewUpdatedAt())
+                            + "  ·  detected " + DATE_FMT.format(h.getDetectedAt()));
+                    line.getStyle().set("font-size", "12px").set("color", "#172b4d")
+                            .set("padding", "6px 8px").set("background", "#f4f5f7").set("border-radius", "4px");
+                    historyList.add(line);
+                }
             }
-        }
 
-        boolean unread = isUnread(feature);
-        Button markReadBtn = new Button(unread ? "Mark as read" : "Already read");
-        markReadBtn.addThemeVariants(ButtonVariant.LUMO_PRIMARY, ButtonVariant.LUMO_SMALL);
-        markReadBtn.setEnabled(unread);
-        markReadBtn.getStyle().set("margin-top", "20px");
-        markReadBtn.addClickListener(e -> markRead(feature));
+            boolean unread = isUnread(item);
+            Button markReadBtn = new Button(unread ? "Mark as read" : "Already read");
+            markReadBtn.addThemeVariants(ButtonVariant.LUMO_PRIMARY, ButtonVariant.LUMO_SMALL);
+            markReadBtn.setEnabled(unread);
+            markReadBtn.getStyle().set("margin-top", "20px");
+            markReadBtn.addClickListener(e -> markRead(item));
+
+            topDetailPanel.add(divider, historyTitle, historyList, markReadBtn);
+        }
 
         Hr docDivider = new Hr();
         docDivider.getStyle().set("margin", "20px 0 16px 0").set("border-color", "#dfe1e6");
-
-        topDetailPanel.add(titleLink, meta, divider, historyTitle, historyList, markReadBtn,
-                docDivider, buildDesignDocSection(feature));
+        topDetailPanel.add(docDivider, buildDesignDocSection(item));
     }
 
-    // ── Design Doc (externally-generated HTML review/plan doc, uploaded per Feature) ────
+    // ── Design Doc (externally-generated HTML review/plan doc, uploaded per item) ────
     // Every upload is a new version — nothing is overwritten, so past versions stay viewable
     // for tracing/comparison later. The highest version number is "latest".
 
-    private VerticalLayout buildDesignDocSection(ConfluenceFeature feature) {
+    private VerticalLayout buildDesignDocSection(SpaceItem item) {
         VerticalLayout section = new VerticalLayout();
         section.setPadding(false);
         section.setSpacing(false);
@@ -718,18 +1032,18 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         H5 title = new H5("Design Doc");
         title.getStyle().set("margin", "0").set("color", "#172b4d").set("font-size", "13px");
 
-        Span help = new Span("Upload the HTML review doc generated externally from this feature's "
+        Span help = new Span("Upload the HTML review doc generated externally from this item's "
                 + "Ticket Docs + Confluence content, then open it here for dev review. Each upload "
                 + "is kept as a new version — older ones stay available below.");
         help.getStyle().set("font-size", "12px").set("color", "#6b778c").set("display", "block");
 
         section.add(title, help);
 
-        List<FeatureDesignDoc> versions = designDocRepo.findByFeatureOrderByVersionDesc(feature);
+        List<FeatureDesignDoc> versions = designDocRepo.findByFeatureOrderByVersionDesc(item);
         FeatureDesignDoc latest = versions.isEmpty() ? null : versions.get(0);
 
         if (latest != null) {
-            Anchor viewLink = new Anchor("/design-docs/" + feature.getId(),
+            Anchor viewLink = new Anchor("/design-docs/" + item.getId(),
                     "Latest: v" + latest.getVersion() + " — "
                             + (latest.getFileName() != null ? latest.getFileName() : "design doc") + " ↗");
             viewLink.setTarget("_blank");
@@ -753,7 +1067,7 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
 
             // Skip index 0 — that's "latest", already shown above.
             for (FeatureDesignDoc old : versions.subList(1, versions.size())) {
-                Anchor oldLink = new Anchor("/design-docs/" + feature.getId() + "/" + old.getVersion(),
+                Anchor oldLink = new Anchor("/design-docs/" + item.getId() + "/" + old.getVersion(),
                         "v" + old.getVersion() + " — " + (old.getFileName() != null ? old.getFileName() : "design doc")
                                 + "  ·  " + DATE_FMT.format(old.getUploadedAt())
                                 + (old.getUploadedByUser() != null ? " · " + old.getUploadedByUser().getFirstName() : "")
@@ -784,10 +1098,10 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
 
         upload.addSucceededListener(event -> {
             try (var in = buffer.getInputStream()) {
-                Path saved = designDocStorage.save(feature.getId(), nextVersion, event.getFileName(), in);
+                Path saved = designDocStorage.save(item.getId(), nextVersion, event.getFileName(), in);
 
                 FeatureDesignDoc newVersion = new FeatureDesignDoc();
-                newVersion.setFeature(feature);
+                newVersion.setFeature(item);
                 newVersion.setVersion(nextVersion);
                 newVersion.setFileName(event.getFileName());
                 newVersion.setFilePath(saved.toString());
@@ -796,7 +1110,7 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
                 designDocRepo.save(newVersion);
 
                 Notification.show("Uploaded as v" + nextVersion, 2500, Notification.Position.BOTTOM_END);
-                renderFeatureInfo(feature);
+                renderItemInfo(item);
             } catch (IOException ex) {
                 Notification n = Notification.show("Failed to save uploaded file: " + ex.getMessage(),
                         4000, Notification.Position.BOTTOM_CENTER);
@@ -812,20 +1126,20 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         return section;
     }
 
-    private void markRead(ConfluenceFeature feature) {
+    private void markRead(SpaceItem item) {
         AppUser user = sessionUserService.getCurrentUser();
-        if (user == null) return;
+        if (user == null || item.getVersion() == null) return;
 
-        FeatureReadStatus status = readStatusRepo.findByFeatureAndUser(feature, user).orElseGet(FeatureReadStatus::new);
-        status.setFeature(feature);
+        SpaceItemReadStatus status = readStatusRepo.findByItemAndUser(item, user).orElseGet(SpaceItemReadStatus::new);
+        status.setItem(item);
         status.setUser(user);
-        status.setLastReadVersion(feature.getVersion());
+        status.setLastReadVersion(item.getVersion());
         status.setReadAt(Instant.now());
         readStatusRepo.save(status);
 
-        readVersionByFeatureId.put(feature.getId(), feature.getVersion());
-        tree.getDataProvider().refreshItem(feature);
-        renderFeatureInfo(feature);
+        readVersionByItemId.put(item.getId(), item.getVersion());
+        tree.getDataProvider().refreshItem(item);
+        renderItemInfo(item);
         Notification.show("Marked as read", 1800, Notification.Position.BOTTOM_END);
     }
 
@@ -922,7 +1236,7 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         itemsGrid.addComponentColumn(i -> {
             Button removeBtn = new Button(VaadinIcon.TRASH.create());
             removeBtn.addThemeVariants(ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_ERROR, ButtonVariant.LUMO_SMALL);
-            removeBtn.addClickListener(e -> removeItem(i));
+            removeBtn.addClickListener(e -> removeTicketItem(i));
             return removeBtn;
         }).setHeader("").setWidth("50px").setFlexGrow(0);
     }
@@ -947,8 +1261,8 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
     // ── Add tickets ──────────────────────────────────────────────────
 
     private void openAddTicketsDialog(ClickEvent<Button> event) {
-        Dialog dialog = new Dialog();
-        dialog.setHeaderTitle("Add tickets to " + selectedFeature.getTitle());
+        Dialog dialog = newDialog();
+        dialog.setHeaderTitle("Add tickets to " + selectedItem.getName());
         dialog.setWidth("480px");
 
         TextArea keysField = new TextArea("Ticket keys");
@@ -987,14 +1301,14 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
     private void addTickets(List<String> keys) {
         loadingBar.setVisible(true);
         UI ui = UI.getCurrent();
-        ConfluenceFeature feature = selectedFeature;
+        SpaceItem item = selectedItem;
         AppUser user = sessionUserService.getCurrentUser();
 
         Runnable task = DelegatingSecurityContextRunnable.create(() -> {
             try {
-                TicketDoc doc = ticketDocRepo.findByFeature(feature).orElseGet(() -> {
+                TicketDoc doc = ticketDocRepo.findByFeature(item).orElseGet(() -> {
                     TicketDoc d = new TicketDoc();
-                    d.setFeature(feature);
+                    d.setFeature(item);
                     return ticketDocRepo.save(d);
                 });
 
@@ -1010,22 +1324,22 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
                     } catch (Exception ex) {
                         continue; // unknown/inaccessible key — skip silently, rest still proceed
                     }
-                    TicketDocItem item = new TicketDocItem();
-                    item.setTicketDoc(doc);
-                    item.setTicketKey(key);
-                    item.setLastKnownUpdated(ticket.getUpdatedInstant());
-                    item.setAddedAt(Instant.now());
-                    item.setAddedByUser(user);
-                    ticketDocItemRepo.save(item);
+                    TicketDocItem docItem = new TicketDocItem();
+                    docItem.setTicketDoc(doc);
+                    docItem.setTicketKey(key);
+                    docItem.setLastKnownUpdated(ticket.getUpdatedInstant());
+                    docItem.setAddedAt(Instant.now());
+                    docItem.setAddedByUser(user);
+                    ticketDocItemRepo.save(docItem);
                     added++;
                 }
 
-                if (added > 0) regenerateDoc(doc, feature);
+                if (added > 0) regenerateDoc(doc, item);
                 int finalAdded = added;
 
                 ui.access(() -> {
                     loadingBar.setVisible(false);
-                    selectedDoc = ticketDocRepo.findByFeature(feature).orElse(null);
+                    selectedDoc = ticketDocRepo.findByFeature(item).orElse(null);
                     renderTicketDocsPanel();
                     Notification.show(finalAdded + " ticket(s) added", 2500, Notification.Position.BOTTOM_END);
                 });
@@ -1044,18 +1358,18 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
     // ── Regenerate ───────────────────────────────────────────────────
 
     private void regenerate() {
-        if (selectedDoc == null || selectedFeature == null) return;
+        if (selectedDoc == null || selectedItem == null) return;
         loadingBar.setVisible(true);
         UI ui = UI.getCurrent();
         TicketDoc doc = selectedDoc;
-        ConfluenceFeature feature = selectedFeature;
+        SpaceItem item = selectedItem;
 
         Runnable task = DelegatingSecurityContextRunnable.create(() -> {
             try {
-                regenerateDoc(doc, feature);
+                regenerateDoc(doc, item);
                 ui.access(() -> {
                     loadingBar.setVisible(false);
-                    selectedDoc = ticketDocRepo.findByFeature(feature).orElse(null);
+                    selectedDoc = ticketDocRepo.findByFeature(item).orElse(null);
                     renderTicketDocsPanel();
                     Notification.show("Regenerated tickets.md", 2500, Notification.Position.BOTTOM_END);
                 });
@@ -1072,22 +1386,22 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
     }
 
     /** Refetches every attached ticket fresh and rewrites the doc's markdown file. */
-    private void regenerateDoc(TicketDoc doc, ConfluenceFeature feature) throws IOException {
+    private void regenerateDoc(TicketDoc doc, SpaceItem item) throws IOException {
         List<TicketDocItem> items = ticketDocItemRepo.findByTicketDoc(doc);
         List<String> keys = items.stream().map(TicketDocItem::getTicketKey).toList();
         List<JiraTicket> tickets = jiraService.getTicketsByKeys(currentConfig, keys);
         Map<String, JiraTicket> byKey = tickets.stream()
                 .collect(Collectors.toMap(JiraTicket::getKey, t -> t, (a, b) -> a));
 
-        Path path = markdownService.generate(feature, tickets);
+        Path path = markdownService.generate(item, tickets);
 
         Instant now = Instant.now();
-        for (TicketDocItem item : items) {
-            JiraTicket fresh = byKey.get(item.getTicketKey());
-            item.setLastKnownUpdated(fresh != null ? fresh.getUpdatedInstant() : item.getLastKnownUpdated());
-            item.setNeedsRegenerate(false);
-            item.setNotifiedAt(null);
-            ticketDocItemRepo.save(item);
+        for (TicketDocItem docItem : items) {
+            JiraTicket fresh = byKey.get(docItem.getTicketKey());
+            docItem.setLastKnownUpdated(fresh != null ? fresh.getUpdatedInstant() : docItem.getLastKnownUpdated());
+            docItem.setNeedsRegenerate(false);
+            docItem.setNotifiedAt(null);
+            ticketDocItemRepo.save(docItem);
         }
 
         doc.setFilePath(path.toString());
@@ -1096,24 +1410,24 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
         ticketDocRepo.save(doc);
     }
 
-    private void removeItem(TicketDocItem item) {
+    private void removeTicketItem(TicketDocItem docItem) {
         // Use the view's own selectedDoc (loaded fresh via a direct repository query) rather than
-        // item.getTicketDoc() — item is a stale Grid row from an earlier request/session, so its
-        // lazy TicketDoc association is an uninitialized proxy that would throw
+        // docItem.getTicketDoc() — docItem is a stale Grid row from an earlier request/session, so
+        // its lazy TicketDoc association is an uninitialized proxy that would throw
         // LazyInitializationException the moment any setter runs on it inside regenerateDoc().
         TicketDoc doc = selectedDoc;
-        ticketDocItemRepo.delete(item);
+        ticketDocItemRepo.delete(docItem);
         try {
             List<TicketDocItem> remaining = ticketDocItemRepo.findByTicketDoc(doc);
             if (!remaining.isEmpty()) {
-                regenerateDoc(doc, selectedFeature);
+                regenerateDoc(doc, selectedItem);
             }
         } catch (Exception ex) {
             Notification n = Notification.show("Removed, but regeneration failed: " + ex.getMessage(),
                     4000, Notification.Position.BOTTOM_CENTER);
             n.addThemeVariants(NotificationVariant.LUMO_ERROR);
         }
-        selectedDoc = ticketDocRepo.findByFeature(selectedFeature).orElse(null);
+        selectedDoc = ticketDocRepo.findByFeature(selectedItem).orElse(null);
         renderTicketDocsPanel();
     }
 
