@@ -1,10 +1,11 @@
 package com.jiramanager.model;
 
 import lombok.Builder;
+import lombok.Builder.Default;
 import lombok.Data;
-import lombok.Singular;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -34,8 +35,8 @@ public class JiraTicket {
     private String url;
 
     // Confluence page IDs extracted from description links (same Atlassian instance)
-    @Singular
-    private List<String> confluencePageIds;
+    @Default
+    private List<String> confluencePageIds = new ArrayList<>();
 
     // Time tracking
     private String originalEstimate;
