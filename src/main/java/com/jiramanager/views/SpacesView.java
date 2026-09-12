@@ -1219,8 +1219,18 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
 
         // Ticket key is the main content here — give it nearly all the width instead of the
         // fixed narrow column used when this grid lived on its own dedicated page.
-        itemsGrid.addColumn(TicketDocItem::getTicketKey)
-                .setHeader("Ticket").setFlexGrow(1).setAutoWidth(false);
+        itemsGrid.addComponentColumn(i -> {
+            String baseUrl = currentConfig != null ? currentConfig.getBaseUrl() : null;
+            if (baseUrl == null) {
+                return new Span(i.getTicketKey());
+            }
+            Anchor keyLink = new Anchor(baseUrl + "/browse/" + i.getTicketKey(), i.getTicketKey());
+            keyLink.setTarget("_blank");
+            keyLink.getStyle()
+                    .set("font-weight", "600")
+                    .set("color", "#0052cc").set("text-decoration", "none");
+            return keyLink;
+        }).setHeader("Ticket").setFlexGrow(1).setAutoWidth(false);
         itemsGrid.addComponentColumn(i -> {
             Span badge = new Span(i.isNeedsRegenerate() ? "Changed on Jira" : "Up to date");
             badge.getStyle()
