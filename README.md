@@ -109,6 +109,32 @@ Notes:
 
 ---
 
+## 🖥️ Build a Windows desktop .exe
+
+`package-exe.ps1` builds a self-contained Windows app package (bundled JRE, no JDK/Maven/Docker needed on the target machine) using `jpackage`. Output: `dist\JiraManager\JiraManager.exe`.
+
+### Requirements
+- **JDK 21** installed locally (the project's Lombok version fails to compile on newer JDKs, e.g. 25). `jpackage` (bundled with the JDK) is used to build the package.
+
+### Build
+```powershell
+./package-exe.ps1 -JavaHome 'C:\Program Files\Eclipse Adoptium\jdk-21.x.x-hotspot'
+```
+If `-JavaHome` is omitted, it defaults to `$env:JAVA_HOME`. The script:
+1. Verifies the given JDK is version 21.
+2. Runs `mvn clean package -Pproduction -DskipTests` (production/minified frontend).
+3. Runs `jpackage` to produce a Windows app image at `dist\JiraManager\`.
+
+### Distributing & running
+Zip the `dist\JiraManager` folder and hand it to users. Double-clicking `JiraManager.exe`:
+- Starts the embedded server and opens the app in a chromeless Edge/Chrome window (falls back to a normal browser tab if neither is found).
+- Adds a system tray icon (Open / Exit) since the packaged app has no console window.
+- Writes its H2 database to a `data\` folder next to the exe — the extracted folder must be somewhere the user can write to (**not** `Program Files`).
+
+`dist/` and `dist_v2/` are in `.gitignore` — build output is never committed.
+
+---
+
 ## 🗄️ Production – switching to PostgreSQL
 
 Add the dependency to `pom.xml`:

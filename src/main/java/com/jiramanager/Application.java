@@ -8,6 +8,22 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 public class Application {
     public static void main(String[] args) {
-        SpringApplication.run(Application.class, args);
+        SpringApplication app = new SpringApplication(Application.class);
+        boolean desktopMode = DesktopLauncher.isDesktopMode();
+        if (desktopMode) {
+            // AWT/SystemTray needs a non-headless JVM; Spring forces headless=true by default.
+            app.setHeadless(false);
+        }
+        try {
+            app.run(args);
+        } catch (RuntimeException e) {
+            // The packaged .exe has no console window, so a startup failure (e.g. the port
+            // already being held by a previous instance) would otherwise be silently swallowed
+            // by jpackage's native launcher ("Failed to launch JVM") with no clue why.
+            if (desktopMode) {
+                DesktopLauncher.showStartupError(e);
+            }
+            throw e;
+        }
     }
 }

@@ -1,6 +1,10 @@
 # Maven
 target/
 
+# Desktop packaging output (see package-exe.ps1)
+dist/
+dist_v2/
+
 # H2 database files
 data/
 
