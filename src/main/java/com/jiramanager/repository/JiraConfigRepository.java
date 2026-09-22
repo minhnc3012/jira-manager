@@ -8,4 +8,11 @@ import java.util.Optional;
 
 public interface JiraConfigRepository extends JpaRepository<JiraConfig, Long> {
     Optional<JiraConfig> findByUser(AppUser user);
+
+    /**
+     * Returns the single shared Jira config, independent of any particular user.
+     * Used while login is disabled (see SecurityConfig / AutoLoginFilter) so that
+     * Settings / Jira features keep working without depending on "the current user".
+     */
+    Optional<JiraConfig> findFirstByOrderByIdAsc();
 }

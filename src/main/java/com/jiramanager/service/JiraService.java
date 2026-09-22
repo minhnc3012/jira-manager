@@ -85,9 +85,9 @@ public class JiraService {
      */
     public boolean isConfigured() {
         if (testContext != null) return true;
-        AppUser user = sessionUserService.getCurrentUser();
-        if (user == null) return false;
-        return jiraConfigRepo.findByUser(user)
+        // Jira config is resolved as a single shared record, independent of who is
+        // logged in — login is currently disabled (see SecurityConfig / AutoLoginFilter).
+        return jiraConfigRepo.findFirstByOrderByIdAsc()
                 .map(cfg -> !isBlank(cfg.getBaseUrl())
                         && !isBlank(cfg.getEmail())
                         && !isBlank(cfg.getApiToken()))
@@ -98,11 +98,9 @@ public class JiraService {
         // In unit tests a pre-built context is injected directly
         if (testContext != null) return testContext;
 
-        var user = sessionUserService.getCurrentUser();
-        if (user == null) {
-            throw new JiraNotConfiguredException("Not logged in.");
-        }
-        JiraConfig cfg = jiraConfigRepo.findByUser(user)
+        // Jira config is resolved as a single shared record, independent of who is
+        // logged in — login is currently disabled (see SecurityConfig / AutoLoginFilter).
+        JiraConfig cfg = jiraConfigRepo.findFirstByOrderByIdAsc()
                 .orElseThrow(() -> new JiraNotConfiguredException(
                         "Jira is not configured. Please go to Settings to add your Jira connection."));
 
@@ -297,9 +295,9 @@ public class JiraService {
      * Always includes the current user, even if the last sync predates their account.
      */
     public List<JiraUser> searchAssignableUsers() {
-        AppUser user = sessionUserService.getCurrentUser();
-        if (user == null) return List.of();
-        JiraConfig cfg = jiraConfigRepo.findByUser(user).orElse(null);
+        // Jira config is resolved as a single shared record, independent of who is
+        // logged in — login is currently disabled (see SecurityConfig / AutoLoginFilter).
+        JiraConfig cfg = jiraConfigRepo.findFirstByOrderByIdAsc().orElse(null);
         if (cfg == null || isBlank(cfg.getBaseUrl())) return List.of();
 
         LinkedHashMap<String, JiraUser> byId = new LinkedHashMap<>();

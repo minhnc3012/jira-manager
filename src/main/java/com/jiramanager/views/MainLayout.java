@@ -109,10 +109,13 @@ public class MainLayout extends AppLayout {
         }
 
         // ── Common: Profile ───────────────────────────────────────────
-        Hr separator = new Hr();
-        separator.getStyle().set("margin", "8px 0");
-        nav.getElement().appendChild(separator.getElement());
-        nav.addItem(new SideNavItem("My Profile", ProfileView.class, VaadinIcon.USER.create()));
+        // TEMPORARY: My Profile is hidden — its @Route is commented out in ProfileView,
+        // so this nav item (and the separator that only existed for it) is disabled too.
+        // Uncomment both here and in ProfileView to bring it back.
+        // Hr separator = new Hr();
+        // separator.getStyle().set("margin", "8px 0");
+        // nav.getElement().appendChild(separator.getElement());
+        // nav.addItem(new SideNavItem("My Profile", ProfileView.class, VaadinIcon.USER.create()));
 
         return nav;
     }
@@ -144,6 +147,27 @@ public class MainLayout extends AppLayout {
         Span spacer = new Span();
         spacer.getStyle().set("flex", "1");
 
+        // TEMPORARY: the whole user/login block (avatar, name, email, sign-out) is hidden
+        // while login is disabled (see SecurityConfig / AutoLoginFilter) — nothing below is
+        // deleted, it's just not built into the navbar. Uncomment buildUserRow() and its call
+        // below to bring it back.
+        // HorizontalLayout userRow = buildUserRow();
+
+        HorizontalLayout navbar = new HorizontalLayout(toggle, spacer);
+        navbar.setWidthFull();
+        navbar.setAlignItems(FlexComponent.Alignment.CENTER);
+        navbar.getStyle()
+                .set("border-bottom", "1px solid var(--lumo-contrast-10pct)")
+                .set("background", "var(--lumo-base-color)")
+                .set("padding-left", "8px");
+        return navbar;
+    }
+
+    /**
+     * Builds the avatar + name + email + sign-out block for the navbar's right side.
+     * TEMPORARY: not called while login is disabled — see buildNavbar() above.
+     */
+    private HorizontalLayout buildUserRow() {
         // User info
         String name  = sessionUserService.getCurrentUserName();
         String email = sessionUserService.getCurrentUserEmail();
@@ -194,14 +218,6 @@ public class MainLayout extends AppLayout {
         userRow.getStyle()
                 .set("padding-right", "16px")
                 .set("margin-left", "auto"); // guarantee right-alignment even if flex fails
-
-        HorizontalLayout navbar = new HorizontalLayout(toggle, spacer, userRow);
-        navbar.setWidthFull();
-        navbar.setAlignItems(FlexComponent.Alignment.CENTER);
-        navbar.getStyle()
-                .set("border-bottom", "1px solid var(--lumo-contrast-10pct)")
-                .set("background", "var(--lumo-base-color)")
-                .set("padding-left", "8px");
-        return navbar;
+        return userRow;
     }
 }

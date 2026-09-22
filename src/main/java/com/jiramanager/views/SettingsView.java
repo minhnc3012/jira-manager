@@ -99,7 +99,7 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
             content.add(banner);
         }
 
-        Paragraph subtitle = new Paragraph("Configure your personal Jira connection. Each user has their own credentials.");
+        Paragraph subtitle = new Paragraph("Configure your Jira connection.");
         subtitle.getStyle().set("color", "#6b778c").set("margin", "0 0 24px 0");
 
         content.add(title, subtitle, buildJiraConfigCard());
@@ -108,9 +108,11 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
 
     private VerticalLayout buildJiraConfigCard() {
         AppUser currentUser = sessionUserService.getCurrentUser();
-        JiraConfig existing = currentUser != null
-                ? jiraConfigRepo.findByUser(currentUser).orElse(null)
-                : null;
+        // Jira config is resolved as a single shared record, independent of who is
+        // logged in — login is currently disabled (see SecurityConfig / AutoLoginFilter).
+        // currentUser is still needed below only to satisfy JiraConfig's non-null user FK
+        // when creating a brand-new config row.
+        JiraConfig existing = jiraConfigRepo.findFirstByOrderByIdAsc().orElse(null);
 
         // Card wrapper
         VerticalLayout card = new VerticalLayout();

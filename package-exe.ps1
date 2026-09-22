@@ -5,9 +5,12 @@
     plus a bundled JRE. Zip the dist\JiraManager folder and hand it to users as-is.
 
 .PARAMETER JavaHome
-    Path to a JDK 21 installation. Required because the project targets Java 21 and its
-    Lombok version does not support building with newer JDKs (e.g. 25). Defaults to
-    $env:JAVA_HOME.
+    Path to a JDK 21 installation. Required because Vaadin 24.6.6's build-frontend plugin
+    scans class bytecode with an ASM version that can't parse class files newer than ~23 —
+    and JIT-generated classes (lambdas, CGLIB/Spring proxies) always carry the *running*
+    JVM's own class-file version, so this holds even though the project's own compiled
+    bytecode targets Java 21 (pom.xml java.version) and plain `mvn compile` works fine
+    under JDK 25 (see lombok.version and .mvn\jvm.config). Defaults to $env:JAVA_HOME.
 #>
 param(
     [string]$JavaHome = $env:JAVA_HOME
@@ -27,7 +30,7 @@ $ErrorActionPreference = "Continue"
 $versionOutput = & "$JavaHome\bin\java.exe" -version 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
 if ($versionOutput -notmatch '"21\.') {
-    Write-Error "JDK at '$JavaHome' is not version 21 (got: $($versionOutput.Split("`n")[0])). This project's Lombok version fails to compile on newer JDKs."
+    Write-Error "JDK at '$JavaHome' is not version 21 (got: $($versionOutput.Split("`n")[0])). Vaadin's build-frontend plugin can't run under newer JDKs yet (see script header)."
     exit 1
 }
 
@@ -74,9 +77,15 @@ if ($LASTEXITCODE -ne 0) { throw "jpackage failed." }
 
 Remove-Item -Recurse -Force $input_
 
+Write-Host "==> Zipping $dist\JiraManager ..."
+$zipPath = "$dist\JiraManager.zip"
+Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
+Compress-Archive -Path "$dist\JiraManager" -DestinationPath $zipPath -CompressionLevel Optimal
+
 Write-Host ""
 Write-Host "==> Done: $dist\JiraManager\JiraManager.exe"
-Write-Host "    Zip the JiraManager folder and send it to users. Double-clicking JiraManager.exe"
-Write-Host "    starts the app, opens the browser to http://localhost:8888, and adds a tray icon"
-Write-Host "    (Open / Exit). Its H2 database is written to a data\ folder next to the exe, so"
-Write-Host "    the extracted folder must be somewhere the user can write to (not Program Files)."
+Write-Host "    Zipped to: $zipPath - send this to users as-is."
+Write-Host "    Double-clicking JiraManager.exe starts the app, opens the browser to"
+Write-Host "    http://localhost:8888, and adds a tray icon (Open / Exit). Its H2 database is"
+Write-Host "    written to a data\ folder next to the exe, so the extracted folder must be"
+Write-Host "    somewhere the user can write to (not Program Files)."

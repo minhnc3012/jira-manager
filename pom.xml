@@ -17,9 +17,16 @@
     </parent>
 
     <properties>
+        <!-- Bytecode target stays at 21: the Vaadin 24.6.6 build plugin and the pinned
+             Spring Boot tooling can't read Java 25 (.class major version 69) yet. The build
+             itself now runs fine under an ambient JDK 25 — see lombok.version below and
+             .mvn/jvm.config — so no separate JDK 21 install is needed just to build. -->
         <java.version>21</java.version>
         <vaadin.version>24.6.6</vaadin.version>
-        <lombok.version>1.18.32</lombok.version>
+        <!-- Bumped from 1.18.32: needed for Lombok's annotation processor to run when the
+             build itself executes under JDK 25 (see .mvn/jvm.config and the explicit
+             annotationProcessorPaths below), even though output bytecode targets 21. -->
+        <lombok.version>1.18.42</lombok.version>
     </properties>
 
     <dependencyManagement>
@@ -112,6 +119,19 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

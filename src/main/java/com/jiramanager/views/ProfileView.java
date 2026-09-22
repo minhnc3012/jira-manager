@@ -22,8 +22,12 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 /**
  * My Profile — available to all logged-in users regardless of role.
  * Allows editing first/last name, phone and changing password (local accounts only).
+ *
+ * TEMPORARY: hidden — @Route is commented out below so /profile no longer resolves and
+ * the "My Profile" nav item is removed (see MainLayout). Nothing else here was touched;
+ * to bring it back, uncomment @Route and restore the nav item.
  */
-@Route(value = "profile", layout = MainLayout.class)
+// @Route(value = "profile", layout = MainLayout.class)
 @PageTitle("My Profile – Jira Manager")
 @PermitAll
 public class ProfileView extends VerticalLayout {
