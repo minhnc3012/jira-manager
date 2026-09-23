@@ -169,7 +169,7 @@ public class JiraService {
                     .onStatus(HttpStatusCode::isError, cr ->
                             cr.bodyToMono(String.class).map(body -> {
                                 log.error("Jira API error — status: {}, body: {}", cr.statusCode(), body);
-                                return new RuntimeException("Jira " + cr.statusCode() + ": " + body);
+                                return new JiraApiException(cr.statusCode().value(), body);
                             }))
                     .bodyToMono(JsonNode.class)
                     .block();
@@ -182,6 +182,9 @@ public class JiraService {
             }
             return tickets;
         } catch (JiraNotConfiguredException e) {
+            throw e;
+        } catch (JiraApiException e) {
+            log.error("Error fetching Jira tickets: {}", e.getMessage());
             throw e;
         } catch (Exception e) {
             log.error("Error fetching Jira tickets: {}", e.getMessage());
@@ -275,17 +278,84 @@ public class JiraService {
 
     /** Returns the accountId + display name of the currently authenticated Jira user. */
     public JiraUser getCurrentJiraUser() {
-        ConfigContext ctx = resolveContext();
-        JsonNode myself = ctx.webClient().get()
-                .uri("/rest/api/3/myself")
+        return resolveCurrentJiraUser(resolveContext());
+    }
+
+    /**
+     * Raw, no-fallback probe of {@code GET /rest/api/3/myself} — unlike
+     * {@link #resolveCurrentJiraUser}, this never falls back to JQL, so it stays a faithful
+     * "can this token resolve its own identity" check. Used only by Settings' "Test Connection"
+     * to proactively warn about restricted-scope API tokens (which can pass the basic ticket
+     * search test below yet still break Worklog / Member list); regular feature code should call
+     * {@link #getCurrentJiraUser()} instead, which tolerates this endpoint being blocked.
+     */
+    public boolean canResolveSelf() {
+        try {
+            ConfigContext ctx = resolveContext();
+            JsonNode myself = ctx.webClient().get()
+                    .uri("/rest/api/3/myself")
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, cr ->
+                            cr.bodyToMono(String.class).map(RuntimeException::new))
+                    .bodyToMono(JsonNode.class)
+                    .block();
+            return myself != null && !myself.path("accountId").asText("").isBlank();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Resolves the current user's Jira identity, preferring {@code GET /rest/api/3/myself}.
+     * Some Atlassian API tokens ("API token with scopes", created via the newer scoped-token
+     * flow) authenticate fine for JQL search but are denied on {@code /myself} — returning
+     * 401 "Client must be authenticated to access this resource" even though the token is
+     * otherwise valid. When that happens, fall back to resolving identity from a ticket already
+     * assigned to the current user via {@code assignee = currentUser()}, which Jira resolves
+     * server-side without a dedicated identity call.
+     */
+    private JiraUser resolveCurrentJiraUser(ConfigContext ctx) {
+        try {
+            JsonNode myself = ctx.webClient().get()
+                    .uri("/rest/api/3/myself")
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, cr ->
+                            cr.bodyToMono(String.class).map(RuntimeException::new))
+                    .bodyToMono(JsonNode.class)
+                    .block();
+            if (myself != null) {
+                String accountId = myself.path("accountId").asText("");
+                if (!accountId.isBlank()) {
+                    return new JiraUser(accountId, myself.path("displayName").asText(""));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("/myself failed ({}) — falling back to assignee=currentUser() to resolve identity",
+                    e.getMessage());
+        }
+
+        JsonNode resp = ctx.webClient().post()
+                .uri("/rest/api/3/search/jql")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"jql":"assignee = currentUser()","maxResults":1,"fields":["assignee"]}
+                        """)
                 .retrieve()
                 .onStatus(HttpStatusCode::isError, cr ->
-                        cr.bodyToMono(String.class).map(e ->
-                                new RuntimeException("Cannot resolve current user: " + e)))
+                        cr.bodyToMono(String.class).map(body ->
+                                new RuntimeException("Cannot resolve current user: " + body)))
                 .bodyToMono(JsonNode.class)
                 .block();
-        if (myself == null) throw new RuntimeException("Cannot resolve current user.");
-        return new JiraUser(myself.path("accountId").asText(""), myself.path("displayName").asText(""));
+        if (resp != null && resp.has("issues") && resp.get("issues").size() > 0) {
+            JsonNode assignee = resp.get("issues").get(0).path("fields").path("assignee");
+            String accountId = assignee.path("accountId").asText("");
+            if (!accountId.isBlank()) {
+                return new JiraUser(accountId, assignee.path("displayName").asText(""));
+            }
+        }
+        throw new RuntimeException("Cannot resolve current user: /myself is not permitted for this "
+                + "API token, and no ticket is currently assigned to you to resolve identity from "
+                + "instead. Assign yourself a ticket, or use a classic (non-scoped) API token in Settings.");
     }
 
     /**
@@ -356,7 +426,8 @@ public class JiraService {
      * sorted by start time ascending.
      */
     public List<WorklogEntry> getWorklogsForDate(LocalDate date) {
-        String accountId = getCurrentUserAccountId(resolveContext().webClient());
+        ConfigContext ctx = resolveContext();
+        String accountId = resolveCurrentJiraUser(ctx).accountId();
         return getWorklogsForDate(date, accountId);
     }
 
@@ -463,19 +534,6 @@ public class JiraService {
             log.error("Error fetching worklogs for {}: {}", date, e.getMessage());
             throw new RuntimeException("Failed to fetch worklogs: " + e.getMessage(), e);
         }
-    }
-
-    /** Returns the accountId of the currently authenticated Jira user. */
-    private String getCurrentUserAccountId(WebClient webClient) {
-        JsonNode myself = webClient.get()
-                .uri("/rest/api/3/myself")
-                .retrieve()
-                .onStatus(HttpStatusCode::isError, cr ->
-                        cr.bodyToMono(String.class).map(e ->
-                                new RuntimeException("Cannot resolve current user: " + e)))
-                .bodyToMono(JsonNode.class)
-                .block();
-        return myself != null ? myself.path("accountId").asText("") : "";
     }
 
     // ── Parsing helpers ───────────────────────────────────────────────
@@ -912,5 +970,21 @@ public class JiraService {
 
     public static class JiraNotConfiguredException extends RuntimeException {
         public JiraNotConfiguredException(String msg) { super(msg); }
+    }
+
+    /**
+     * Thrown when Jira/Confluence answers with an HTTP error status, carrying that status so
+     * callers (e.g. Settings' "Test Connection") can tell an invalid/expired token (401) apart
+     * from a valid-but-underprivileged one (403) instead of just showing the raw response body.
+     */
+    public static class JiraApiException extends RuntimeException {
+        private final int statusCode;
+
+        public JiraApiException(int statusCode, String body) {
+            super("HTTP " + statusCode + ": " + body);
+            this.statusCode = statusCode;
+        }
+
+        public int getStatusCode() { return statusCode; }
     }
 }

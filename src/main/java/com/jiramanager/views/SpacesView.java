@@ -179,8 +179,11 @@ public class SpacesView extends VerticalLayout implements BeforeEnterObserver {
             event.forwardTo("settings?jira_required=true");
             return;
         }
-        AppUser user = sessionUserService.getCurrentUser();
-        currentConfig = user != null ? jiraConfigRepo.findByUser(user).orElse(null) : null;
+        // Jira config is resolved as a single shared record, independent of who is
+        // logged in — login is currently disabled (see SecurityConfig / AutoLoginFilter).
+        // Mirrors JiraService#resolveContext / SettingsView; findByUser is stale here since
+        // Settings no longer keeps JiraConfig.user in sync with whoever is auto-logged in.
+        currentConfig = jiraConfigRepo.findFirstByOrderByIdAsc().orElse(null);
 
         loadSpaces();
         notifyPendingTicketDocChanges();

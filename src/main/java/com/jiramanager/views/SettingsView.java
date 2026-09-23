@@ -179,12 +179,24 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
             // Save temporarily then test
             saveConfig(currentUser, existing, baseUrl, email, token);
             try {
-                jiraService.getMyTickets(); // will use the just-saved config
-                showStatus(statusLabel, "Connection successful!", true);
+                jiraService.getMyTickets(); // will use the just-saved config — proves the
+                                             // Base URL/email/token combo actually authenticates
+                if (jiraService.canResolveSelf()) {
+                    showStatus(statusLabel, "Connection successful!", true);
+                } else {
+                    // Authenticated fine for ticket search, but /myself is denied — a hallmark of
+                    // an Atlassian "API token with scopes" that's missing scopes several features
+                    // here need (Worklog, Member list). Not a hard failure, so still green-ish,
+                    // but call it out instead of silently letting those features break later.
+                    showWarningStatus(statusLabel, "Connected, but this API token looks restricted "
+                            + "(scoped) — Worklog and the Member list may not work. If so, create a "
+                            + "classic API token (not \"with scopes\") at id.atlassian.com and use "
+                            + "that instead.");
+                }
             } catch (JiraService.JiraNotConfiguredException ex) {
                 showStatus(statusLabel, "Configuration incomplete: " + ex.getMessage(), false);
             } catch (Exception ex) {
-                showStatus(statusLabel, "Connection failed: " + ex.getMessage(), false);
+                showStatus(statusLabel, describeConnectionError(ex), false);
             }
         });
 
@@ -242,5 +254,37 @@ public class SettingsView extends VerticalLayout implements BeforeEnterObserver 
     private void showStatus(Span label, String message, boolean success) {
         label.setText(message);
         label.getStyle().set("color", success ? "#006644" : "#bf2600");
+    }
+
+    /** Amber variant — connected, but something's worth the user's attention (not a hard failure). */
+    private void showWarningStatus(Span label, String message) {
+        label.setText(message);
+        label.getStyle().set("color", "#974f00");
+    }
+
+    /**
+     * Turns a connection-test failure into an actionable message instead of a raw Jira error
+     * body — specifically calling out an invalid/expired token (401) vs. a valid token lacking
+     * permission (403), since those need different fixes.
+     */
+    private String describeConnectionError(Exception ex) {
+        for (Throwable cause = ex; cause != null; cause = cause.getCause()) {
+            if (cause instanceof JiraService.JiraApiException apiEx) {
+                return switch (apiEx.getStatusCode()) {
+                    case 401 -> "API token is invalid or has expired. Generate a new one at "
+                            + "id.atlassian.com and paste it above.";
+                    case 403 -> "Token is valid, but this account doesn't have permission to "
+                            + "browse projects on this Jira site. Check the account's Jira "
+                            + "permissions, or try a classic (non-scoped) API token.";
+                    case 404 -> "Jira didn't recognize that Base URL — double-check it (no "
+                            + "trailing slash, e.g. https://yourcompany.atlassian.net).";
+                    default -> "Connection failed (HTTP " + apiEx.getStatusCode() + "): "
+                            + apiEx.getMessage();
+                };
+            }
+        }
+        // No structured HTTP status available — most likely can't reach the Base URL at all
+        // (typo, DNS, offline).
+        return "Connection failed: " + ex.getMessage();
     }
 }
