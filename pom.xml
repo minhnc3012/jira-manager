@@ -46,6 +46,15 @@
         <dependency>
             <groupId>com.vaadin</groupId>
             <artifactId>vaadin-spring-boot-starter</artifactId>
+            <exclusions>
+                <!-- Copilot (dev-mode in-browser UI editor) is unused here and its 24.6.x
+                     build logs NPE warnings (Copilot.handleMessage) when a stale browser tab
+                     reconnects after an app restart. The rest of the dev-tools bar stays. -->
+                <exclusion>
+                    <groupId>com.vaadin</groupId>
+                    <artifactId>copilot</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- Spring Security -->
